@@ -109,7 +109,7 @@ function generateLicenseKey() {
   return `MC-${part()}-${part()}-${part()}`;
 }
 
-// ─── 8. TESTIMONIAL WEBHOOK ──────────────────
+// ─── 7a. TESTIMONIAL WEBHOOK (Worker-compatible) ─
 async function sendTestiWebhook(txData, discordUser) {
   const webhookUrl = process.env.TESTI_WEBHOOK_URL;
   if (!webhookUrl) return;
@@ -129,25 +129,59 @@ async function sendTestiWebhook(txData, discordUser) {
     const totalOrder = count || 1;
     const unixTime = Math.floor(Date.now() / 1000);
 
-    const embed = new EmbedBuilder()
-      .setColor('#7803eb')
-      .setTitle('🎉 **Payment Received**')
-      .setDescription(`Pembelian dari **${safeName}** telah terverifikasi.`)
-      .addFields(
-        { name: '🛍️ Order',       value: `**#${totalOrder}**`,      inline: true },
-        { name: '📅 Time',         value: `<t:${unixTime}:R>`,       inline: true },
-      )
-      .setFooter({ text: 'Motion Core Payment' })
-      .setTimestamp();
-
     await axios.post(webhookUrl, {
       username: 'Motion Core Payment',
-      embeds: [embed.toJSON()],
+      embeds: [{
+        title: '🎉 NEW PURCHASE VERIFIED',
+        description: 'Terima kasih telah berlangganan layanan Motion Core!',
+        color: 16766720, // Gold #FFD700
+        fields: [
+          { name: '👤 Pembeli',      value: `\`${safeName}\``, inline: true },
+          { name: '🛍️ Pembelian Ke', value: `**#${totalOrder}**`,   inline: true },
+          { name: '📅 Waktu',        value: `<t:${unixTime}:f>`,   inline: true },
+        ],
+        footer: { text: 'Verified by Motion Core System' },
+        timestamp: new Date().toISOString(),
+      }],
     });
 
     logger.info(`Testimonial webhook sent for ${txData.username}`);
   } catch (err) {
     logger.warn(`Failed to send testimonial webhook: ${err.message}`);
+  }
+}
+
+// ─── 7b. ADMIN TRANSCRIPT WEBHOOK ──────────────
+async function sendAdminLog(txData, keyString, isExtension, planLabel) {
+  const webhookUrl = process.env.ADMIN_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  try {
+    const fmtPrice = new Intl.NumberFormat('id-ID').format(txData.amount);
+    const title = isExtension ? '🔄 LICENSE EXTENDED' : '💸 NEW AUTOMATIC PAYMENT';
+    const color = isExtension ? 3066993 : 5763719; // Green : Blue
+
+    await axios.post(webhookUrl, {
+      username: 'Motion Core Web Bot',
+      embeds: [{
+        title,
+        description: [
+          `**User:** \`${txData.username}\``,
+          `**Plan:** ${planLabel || txData.payment_method}`,
+          `**Amount:** Rp ${fmtPrice}`,
+          `**Key:** \`${keyString}\``,
+          `**Ref:** ${txData.ref_code || '-'}`,
+          `**Order ID:** \`${txData.order_id}\``,
+        ].join('\n'),
+        color,
+        footer: { text: 'Motion Core Auto System via Pakasir' },
+        timestamp: new Date().toISOString(),
+      }],
+    });
+
+    logger.info(`Admin log sent for order ${txData.order_id}`);
+  } catch (err) {
+    logger.warn(`Failed to send admin log: ${err.message}`);
   }
 }
 
@@ -665,8 +699,9 @@ app.post('/webhook/pakasir', async (req, res) => {
       }
     }
 
-    // ── 11f. Send testimonial webhook ──
+    // ── 11f. Send testimonial webhook + admin transcript ──
     await sendTestiWebhook(txData, dUser);
+    await sendAdminLog(txData, finalKey, isExtension, planInfo?.label);
 
     // ── 11g. Cleanup: remove QRIS message ──
     const pendingInteraction = activeOrders.get(order_id);
