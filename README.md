@@ -40,7 +40,7 @@ cp .env.example .env
 
 | Variable | Deskripsi |
 |----------|-----------|
-| `DISCORD_TOKEN` | Bot token dari [Discord Developer Portal](https://discord.com/developers/applications) |
+| `DISCORD_BOT_TOKEN` | Bot token dari [Discord Developer Portal](https://discord.com/developers/applications) |
 | `GUILD_ID` | ID Server Discord tempat bot |
 | `VIP_ROLE_ID` | ID Role VIP yang akan diberikan |
 | `SUPABASE_URL` | Project URL Supabase |

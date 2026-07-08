@@ -719,7 +719,7 @@ client.once('clientReady', async () => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN)
+client.login(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN)
   .then(() => logger.info('Discord login successful'))
   .catch(err => {
     logger.error('Discord login FAILED:', err.message);
