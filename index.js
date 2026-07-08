@@ -130,15 +130,14 @@ async function sendTestiWebhook(txData, discordUser) {
     const unixTime = Math.floor(Date.now() / 1000);
 
     const embed = new EmbedBuilder()
-      .setTitle('🎉 NEW PURCHASE VERIFIED')
-      .setDescription('Terima kasih telah berlangganan layanan Motion Core!')
-      .setColor('#FFD700')
+      .setColor('#7803eb')
+      .setTitle('🎉 **Payment Received**')
+      .setDescription(`Pembelian dari **${safeName}** telah terverifikasi.`)
       .addFields(
-        { name: '👤 Pembeli',      value: `\`${safeName}\``, inline: true },
-        { name: '🛍️ Pembelian Ke', value: `**#${totalOrder}**`,   inline: true },
-        { name: '📅 Waktu',        value: `<t:${unixTime}:f>`,   inline: true },
+        { name: '🛍️ Order',       value: `**#${totalOrder}**`,      inline: true },
+        { name: '📅 Time',         value: `<t:${unixTime}:R>`,       inline: true },
       )
-      .setFooter({ text: 'Verified by Motion Core System' })
+      .setFooter({ text: 'Motion Core Payment' })
       .setTimestamp();
 
     await axios.post(webhookUrl, {
@@ -185,27 +184,22 @@ client.on('interactionCreate', async (interaction) => {
           .setURL('https://discord.com/channels/1523647512337055917/1523684804728717383'),
       );
 
-      const embedFields = [
-        { name: '💎 VIP SCRIPT',  value: 'Akses penuh ke seluruh fitur eksekusi tingkat lanjut.', inline: true },
-        { name: '🛠️ SUPPORT',    value: 'Update prioritas dan bantuan kendala 24/7.',            inline: true },
-        { name: '📌 Cara Order',  value: [
-          '1️⃣ Klik **💳 Beli Sekarang** — pilih paket + input username.',
-          '2️⃣ Scan QRIS yang tampil dengan E-Wallet/M-Banking.',
-          '3️⃣ **Key otomatis dikirim ke DM Discord Anda!**',
-        ].join('\n'), inline: false },
-        { name: '📋 Informasi Penting', value: [
-          '⚠️ Pastikan setting privasi DM Discord Anda **terbuka**.',
-          '🔒 Sistem beroperasi otomatis 24 jam penuh.',
-          '⏳ QRIS berlaku **15 menit**. Jika expired, order ulang.',
-        ].join('\n'), inline: false },
-      ];
-
       const embed = new EmbedBuilder()
-        .setTitle('👑 Motion Core • Order System')
-        .setDescription('Silakan gunakan tombol di bawah untuk membeli lisensi secara otomatis.')
-        .addFields(embedFields)
         .setColor('#7803eb')
-        .setFooter({ text: 'Motion Core Auto System' });
+        .setTitle('👑 **Motion Core**')
+        .setURL('https://dsc.gg/motioncore')
+        .setDescription([
+          '### 💳 Order System',
+          'Pilih tombol **Beli Sekarang** untuk memulai pembelian lisensi.',
+          '',
+          '> Key dikirim otomatis via **DM Discord** setelah pembayaran dikonfirmasi.',
+        ].join('\n'))
+        .addFields(
+          { name: '💎 **VIP Script**', value: 'Akses penuh • Update prioritas • Support 24/7', inline: true },
+          { name: '⏳ **QRIS**',       value: 'Scan E-Wallet • Key otomatis • 15 menit',        inline: true },
+        )
+        .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
+        .setTimestamp();
 
       await interaction.reply({
         content: '✅ Menu order VIP berhasil dipasang di channel ini.',
@@ -329,19 +323,21 @@ client.on('interactionCreate', async (interaction) => {
 
         const expiryUnix = Math.floor((Date.now() + QRIS_TIMEOUT_MS) / 1000);
         const embedQris = new EmbedBuilder()
-          .setTitle(`💳 Pembayaran Paket ${packageInfo.label}`)
+          .setColor('#7803eb')
+          .setTitle('💳 **Pembayaran**')
           .setDescription([
-            `**Target Roblox:** ${robloxUsername}`,
+            `### ${packageInfo.label}`,
+            `**Harga:** Rp ${packageInfo.price.toLocaleString('id-ID')}`,
+            `**Target:** \`${robloxUsername}\``,
             '',
-            'Silakan scan QRIS di bawah. Key akan otomatis dikirim ke **DM Discord** Anda setelah pembayaran berhasil.',
+            'Silakan scan QRIS di bawah ini dengan **E-Wallet** atau **M-Banking**.',
             '',
-            `**Harga: Rp ${packageInfo.price.toLocaleString('id-ID')}**`,
-            `**Batas waktu:** <t:${expiryUnix}:R>`,
-            `**Aktif sampai:** <t:${Math.floor((Date.now() + packageInfo.days * 86400000) / 1000)}:f>`,
+            `🕐 Kedaluwarsa <t:${expiryUnix}:R>`,
+            `📅 Aktif hingga <t:${Math.floor((Date.now() + packageInfo.days * 86400000) / 1000)}:f>`,
           ].join('\n'))
           .setImage('attachment://qris.png')
-          .setColor('#00efff')
-          .setFooter({ text: `Order: ${orderId} • Scan sebelum ${new Date(Date.now() + QRIS_TIMEOUT_MS).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}` });
+          .setFooter({ text: `Order: ${orderId}`, iconURL: client.user?.displayAvatarURL() })
+          .setTimestamp();
 
         await interaction.editReply({ embeds: [embedQris], files: [attachment] });
         logger.info(
@@ -628,22 +624,23 @@ app.post('/webhook/pakasir', async (req, res) => {
         const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
 
         const dmEmbed = new EmbedBuilder()
-          .setTitle('✅ LICENSE ACTIVE')
+          .setColor('#6bff8f')
+          .setTitle('✅ **License Active**')
+          .setDescription([
+            '```',
+            finalKey,
+            '```',
+          ].join('\n'))
           .addFields(
-            { name: '🔑 License Key', value: `\`\`\`\n${finalKey}\n\`\`\``, inline: false },
-            { name: 'ℹ️ Status',  value: statusText,                       inline: true  },
-            { name: '📅 Expired', value: `<t:${unixTs}:f>`,                inline: true  },
-            { name: '📜 Script',  value: [
+            { name: '📌 Status',   value: statusText,                     inline: true },
+            { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,              inline: true },
+            { name: '📜 Script',   value: [
               '```lua',
               'loadstring(game:HttpGet("https://vip.motioncore.web.id"))()',
               '```',
             ].join('\n'), inline: false },
           )
-          .setColor('#6bff8f')
-          .setFooter({
-            text: 'Terima kasih telah menggunakan Motion Core!',
-            iconURL: client.user?.displayAvatarURL() || undefined,
-          })
+          .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
           .setTimestamp();
 
         await dUser.send({ embeds: [dmEmbed] }).catch(dmErr => {
