@@ -500,15 +500,29 @@ app.post('/webhook/pakasir', async (req, res) => {
       logger.warn(`Order ${order_id} has no Discord ID in ref_code — key generated but no DM sent`);
     }
 
-    // ── 11d. License key logic (extend or new) ──
+    // ── 11d. License key logic (Worker-compatible) ──
+    // Parse duration dari plan string (sama seperti Worker)
+    const plan = txData.payment_method;
+    let durationDays = 1;
+    if (plan.includes('30')) durationDays = 30;
+    else if (plan.includes('14')) durationDays = 14;
+    else if (plan.includes('7')) durationDays = 7;
+
     const planInfo = VIP_PRICES[txData.payment_method];
-    if (!planInfo) {
-      logger.error(`Unknown payment method: ${txData.payment_method} for order ${order_id}`);
-      return res.status(200).json({ status: 'error', message: 'Unknown package' });
+
+    // Cek apakah key sudah pernah di-generate untuk order ini (duplicate check)
+    const { data: existingKeyForOrder } = await supabase
+      .from('license_keys')
+      .select('*')
+      .contains('transaction_proof', order_id)
+      .maybeSingle();
+
+    if (existingKeyForOrder) {
+      logger.info(`Order ${order_id} already has key generated — duplicate callback`);
+      return res.status(200).json({ status: 'success', message: 'Already processed' });
     }
 
-    const addedMillis = planInfo.days * 24 * 60 * 60 * 1000;
-
+    // Cari existing user
     const { data: existingUser } = await supabase
       .from('license_keys')
       .select('*')
@@ -519,31 +533,70 @@ app.post('/webhook/pakasir', async (req, res) => {
     let finalKey;
     let statusText;
     let expiresAt;
+    let isExtension = false;
 
     if (existingUser) {
-      // ── EXTEND existing key ──
-      finalKey = existingUser.key_string;
-      statusText = 'Renewed (Key Diperpanjang)';
-
-      const currentExp = new Date(existingUser.expires_at).getTime();
       const now = Date.now();
-      const baseTime = currentExp > now ? currentExp : now;
-      expiresAt = new Date(baseTime + addedMillis).toISOString();
+      const isExpired = existingUser.expires_at && new Date(existingUser.expires_at).getTime() < now;
 
-      await supabase.from('license_keys').update({
-        expires_at:         expiresAt,
-        duration_days:      (existingUser.duration_days || 0) + planInfo.days,
-        transaction_amount: (Number(existingUser.transaction_amount) || 0) + Number(txData.amount),
-        transaction_proof:  `${existingUser.transaction_proof || ''} | ${order_id}`,
-      }).eq('id', existingUser.id);
+      if (isExpired) {
+        // ── Key expired → mark inactive + buat key baru ──
+        await supabase.from('license_keys')
+          .update({ is_active: false })
+          .eq('id', existingUser.id);
 
-      logger.info(`Key EXTENDED: ${finalKey} for ${txData.username} (+${planInfo.days} days)`);
+        logger.info(`Key ${existingUser.key_string} expired — marked inactive, creating new`);
+
+        // Buat key baru (fresh)
+        finalKey = generateLicenseKey();
+        statusText = 'New Key (Expired Renewal)';
+        expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
+
+        await supabase.from('license_keys').insert([{
+          key_string:         finalKey,
+          assigned_username:  txData.username,
+          discord_id:         discordUserId,
+          is_active:          true,
+          duration_mode:      txData.payment_method,
+          duration_days:      durationDays,
+          expires_at:         expiresAt,
+          transaction_amount: txData.amount,
+          transaction_proof:  order_id,
+          allowed_modules:    ['all'],
+          note:               'Auto Payment via Pakasir (Fresh Key - Expired Renewal)',
+        }]);
+
+        logger.info(`New KEY (expired renewal): ${finalKey} for ${txData.username} (${durationDays} days)`);
+
+      } else {
+        // ── Key still active → EXTEND ──
+        isExtension = true;
+        finalKey = existingUser.key_string;
+        statusText = 'Renewed (Key Diperpanjang)';
+
+        const addMillis = durationDays * 24 * 60 * 60 * 1000;
+        const currentExp = new Date(existingUser.expires_at).getTime();
+        const baseTime = currentExp > now ? currentExp : now;
+        expiresAt = new Date(baseTime + addMillis).toISOString();
+
+        const updateData = {
+          expires_at:         expiresAt,
+          duration_days:      (existingUser.duration_days || 0) + durationDays,
+          transaction_amount: (Number(existingUser.transaction_amount) || 0) + Number(txData.amount),
+          transaction_proof:  `${existingUser.transaction_proof || ''} | ${order_id}`,
+          note:               `${existingUser.note || ''} [AutoExtend: +${durationDays}d]`,
+        };
+
+        await supabase.from('license_keys').update(updateData).eq('id', existingUser.id);
+
+        logger.info(`Key EXTENDED: ${finalKey} for ${txData.username} (+${durationDays} days)`);
+      }
 
     } else {
-      // ── NEW key ──
+      // ── NEW user → fresh key ──
       finalKey = generateLicenseKey();
       statusText = 'New User (Fresh Key)';
-      expiresAt = new Date(Date.now() + addedMillis).toISOString();
+      expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
 
       await supabase.from('license_keys').insert([{
         key_string:         finalKey,
@@ -551,14 +604,15 @@ app.post('/webhook/pakasir', async (req, res) => {
         discord_id:         discordUserId,
         is_active:          true,
         duration_mode:      txData.payment_method,
-        duration_days:      planInfo.days,
+        duration_days:      durationDays,
         expires_at:         expiresAt,
         transaction_amount: txData.amount,
         transaction_proof:  order_id,
         allowed_modules:    ['all'],
+        note:               'Auto Payment via Pakasir (Fresh Key)',
       }]);
 
-      logger.info(`New KEY: ${finalKey} for ${txData.username} (${planInfo.days} days)`);
+      logger.info(`New KEY: ${finalKey} for ${txData.username} (${durationDays} days)`);
     }
 
     // ── 11e. Send DM & assign role ──
