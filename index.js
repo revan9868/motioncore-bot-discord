@@ -185,18 +185,6 @@ client.on('interactionCreate', async (interaction) => {
           .setURL('https://discord.com/channels/1523647512337055917/1523684804728717383'),
       );
 
-      // Cek history user (admin yang deploy — untuk sample di embed)
-      let historyField = null;
-      try {
-        const { count: totalTx } = await supabase
-          .from('transaction_logs')
-          .select('*', { count: 'exact', head: true })
-          .eq('status', 'completed');
-        if (totalTx && totalTx > 0) {
-          historyField = { name: '📊 Total Pelanggan', value: `**${totalTx}** pembeli telah dilayani!`, inline: false };
-        }
-      } catch (_) { /* ignore */ }
-
       const embedFields = [
         { name: '💎 VIP SCRIPT',  value: 'Akses penuh ke seluruh fitur eksekusi tingkat lanjut.', inline: true },
         { name: '🛠️ SUPPORT',    value: 'Update prioritas dan bantuan kendala 24/7.',            inline: true },
@@ -211,7 +199,6 @@ client.on('interactionCreate', async (interaction) => {
           '⏳ QRIS berlaku **15 menit**. Jika expired, order ulang.',
         ].join('\n'), inline: false },
       ];
-      if (historyField) embedFields.push(historyField);
 
       const embed = new EmbedBuilder()
         .setTitle('👑 Motion Core • Order System')
