@@ -706,6 +706,71 @@ client.once('clientReady', async () => {
   }
 });
 
+// ─── 14. WEEKLY CRON: Hapus role expired ──────
+const WEEKLY_MS = 7 * 24 * 60 * 60 * 1000; // 7 hari
+
+async function cleanupExpiredKeys() {
+  logger.info('🔍 Running weekly expired key cleanup...');
+
+  try {
+    const now = new Date().toISOString();
+    const { data: expiredKeys, error } = await supabase
+      .from('license_keys')
+      .select('*')
+      .eq('is_active', true)
+      .lt('expires_at', now);
+
+    if (error) {
+      logger.error(`Cleanup DB error: ${error.message}`);
+      return;
+    }
+
+    if (!expiredKeys || expiredKeys.length === 0) {
+      logger.info('✅ No expired keys found');
+      return;
+    }
+
+    logger.info(`Found ${expiredKeys.length} expired key(s)`);
+
+    for (const key of expiredKeys) {
+      // Set inactive
+      await supabase.from('license_keys')
+        .update({ is_active: false })
+        .eq('id', key.id);
+
+      // Hapus role Discord
+      if (key.discord_id) {
+        try {
+          const guild = await client.guilds.fetch(process.env.GUILD_ID);
+          const member = await guild.members.fetch(key.discord_id);
+          if (member) {
+            await member.roles.remove(process.env.VIP_ROLE_ID);
+            logger.info(`Role removed from ${key.discord_id} (expired key)`);
+
+            // DM notifikasi
+            await member.send({
+              content: '⏳ **Lisensi VIP kamu sudah expired.**\nSilakan perpanjang melalui channel <#1523684804728717383> agar tetap bisa menggunakan script.',
+            }).catch(() => {});
+          }
+        } catch (memberErr) {
+          logger.debug(`Cannot process member ${key.discord_id}: ${memberErr.message}`);
+        }
+      }
+    }
+
+    logger.info(`✅ Cleanup complete: ${expiredKeys.length} key(s) deactivated`);
+  } catch (err) {
+    logger.error(`Cleanup error: ${err.message}`);
+  }
+}
+
+// Jalankan setiap minggu setelah bot online
+setTimeout(() => {
+  cleanupExpiredKeys();
+  setInterval(cleanupExpiredKeys, WEEKLY_MS);
+  logger.info(`⏰ Weekly cleanup scheduled (every ${WEEKLY_MS / 86400000} days)`);
+}, 10000); // Tunggu 10 detik setelah startup
+
 client.login(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN)
   .then(() => logger.info('Discord login successful'))
   .catch(err => {
