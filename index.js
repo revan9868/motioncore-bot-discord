@@ -131,6 +131,7 @@ async function sendTestiWebhook(txData, discordUser) {
 
     await axios.post(webhookUrl, {
       username: 'Motion Core Payment',
+      avatar_url: 'https://i.postimg.cc/1zFrmJkR/photo-2026-07-06-18-11-06.jpg',
       embeds: [{
         title: '🎉 NEW PURCHASE VERIFIED',
         description: 'Terima kasih telah berlangganan layanan Motion Core!',
@@ -163,6 +164,7 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
 
     await axios.post(webhookUrl, {
       username: 'Motion Core Web Bot',
+      avatar_url: 'https://i.postimg.cc/1zFrmJkR/photo-2026-07-06-18-11-06.jpg',
       embeds: [{
         title,
         description: [
