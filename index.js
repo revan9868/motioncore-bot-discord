@@ -663,7 +663,9 @@ async function cleanupExpiredKeys() {
     for (const key of expiredKeys) {
       await supabase.from('license_keys')
         .update({ is_active: false })
-        .eq('id', key.id);
+        .eq('key_string', key.key_string);
+
+      logger.info(`Key ${key.key_string} deactivated (expired)`);
 
       if (key.discord_id) {
         try {
