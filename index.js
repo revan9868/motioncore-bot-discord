@@ -1,46 +1,28 @@
 // ==========================================
-// MOTION CORE DISCORD BOT — PRODUCTION v1.2
+// MOTION CORE DISCORD BOT — v2.0 (Independent)
 // Auto VIP License Delivery via QRIS
-// Components V2: LabelBuilder, TextDisplay, etc.
+// Components V2: No Express, Polling-based
 // ==========================================
 
 // ─── 1. IMPORTS ─────────────────────────────
 require('dotenv').config();
-const express = require('express');
 const {
   // Core
   Client, GatewayIntentBits, MessageFlags,
 
   // ── Layout Components ──
   ActionRowBuilder,
-  ContainerBuilder,
-  SectionBuilder,
-  SeparatorBuilder,
 
   // ── Content Components (V2) ──
-  TextDisplayBuilder,
-  MediaGalleryBuilder,
-  MediaGalleryItemBuilder,
-  ThumbnailBuilder,
-  FileBuilder,
+  LabelBuilder,
 
   // ── Interactive: Buttons & Selects ──
   ButtonBuilder, ButtonStyle,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder,
-  UserSelectMenuBuilder,
-  RoleSelectMenuBuilder,
-  MentionableSelectMenuBuilder,
-  ChannelSelectMenuBuilder,
 
   // ── Interactive: Modal Inputs (V2) ──
   ModalBuilder,
   TextInputBuilder, TextInputStyle,
-  LabelBuilder,
-  RadioGroupBuilder, RadioGroupOptionBuilder,
-  CheckboxBuilder,
-  CheckboxGroupBuilder, CheckboxGroupOptionBuilder,
-  FileUploadBuilder,
+  RadioGroupBuilder,
 
   // ── Rich Content ──
   EmbedBuilder,
@@ -72,23 +54,16 @@ const VIP_PRICES = {
 
 const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const QRIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 menit
-const PK_ALLOWED_IPS = (process.env.PAKASIR_IPS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-const PORT = process.env.PORT || 3000;
+const POLL_INTERVAL_MS = 15 * 1000;      // 15 detik
 const COMMAND_NAME = 'setup-vip';
 
-// ─── 4. EXPRESS SETUP ────────────────────────
-const app = express();
-app.set('trust proxy', true); // Railway behind reverse proxy
-app.use(express.json({ limit: '1mb' }));
-
-// ─── 5. SUPABASE ─────────────────────────────
+// ─── 4. SUPABASE ─────────────────────────────
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
 
-// ─── 6. DISCORD CLIENT ───────────────────────
+// ─── 5. DISCORD CLIENT ───────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -97,10 +72,11 @@ const client = new Client({
   ],
 });
 
-// Map<order_id, interaction> — track active QRIS payments for cleanup
+// Map<order_id, { discordUserId, channelId, plan, interaction }>
+// Used for QRIS cleanup & expiry notification (in-memory, lost on restart — acceptable)
 const activeOrders = new Map();
 
-// ─── 7. LICENSE KEY GENERATOR ────────────────
+// ─── 6. LICENSE KEY GENERATOR ────────────────
 function generateLicenseKey() {
   const part = () =>
     Array.from({ length: 4 }, () =>
@@ -109,7 +85,7 @@ function generateLicenseKey() {
   return `MC-${part()}-${part()}-${part()}`;
 }
 
-// ─── 7a. TESTIMONIAL WEBHOOK (Worker-compatible) ─
+// ─── 7. TESTIMONIAL WEBHOOK ──────────────────
 async function sendTestiWebhook(txData, discordUser) {
   const webhookUrl = process.env.TESTI_WEBHOOK_URL;
   if (!webhookUrl) return;
@@ -135,7 +111,7 @@ async function sendTestiWebhook(txData, discordUser) {
       embeds: [{
         title: '🎉 NEW PURCHASE VERIFIED',
         description: 'Terima kasih telah berlangganan layanan Motion Core!',
-        color: 16766720, // Gold #FFD700
+        color: 16766720,
         fields: [
           { name: '👤 Pembeli',      value: `\`${safeName}\``, inline: true },
           { name: '🛍️ Pembelian Ke', value: `**#${totalOrder}**`,   inline: true },
@@ -152,7 +128,7 @@ async function sendTestiWebhook(txData, discordUser) {
   }
 }
 
-// ─── 7b. ADMIN TRANSCRIPT WEBHOOK ──────────────
+// ─── 8. ADMIN LOG WEBHOOK ────────────────────
 async function sendAdminLog(txData, keyString, isExtension, planLabel) {
   const webhookUrl = process.env.ADMIN_WEBHOOK_URL;
   if (!webhookUrl) return;
@@ -160,7 +136,7 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
   try {
     const fmtPrice = new Intl.NumberFormat('id-ID').format(txData.amount);
     const title = isExtension ? '🔄 LICENSE EXTENDED' : '💸 NEW AUTOMATIC PAYMENT';
-    const color = isExtension ? 3066993 : 5763719; // Green : Blue
+    const color = isExtension ? 3066993 : 5763719;
 
     await axios.post(webhookUrl, {
       username: 'Motion Core Web Bot',
@@ -176,7 +152,7 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
           `**Order ID:** \`${txData.order_id}\``,
         ].join('\n'),
         color,
-        footer: { text: 'Motion Core Auto System via Pakasir' },
+        footer: { text: 'Motion Core Auto System via Polling' },
         timestamp: new Date().toISOString(),
       }],
     });
@@ -187,10 +163,272 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
   }
 }
 
-// ─── 9. DISCORD INTERACTIONS ─────────────────
+// ─── 9. PROCESS PAYMENT (shared: called by polling) ──
+async function processPayment(txData) {
+  const orderId = txData.order_id;
+
+  // ── 9a. Extract Discord ID from ref_code ──
+  let discordUserId = null;
+  if (txData.ref_code && txData.ref_code.startsWith('DSCRD-')) {
+    discordUserId = txData.ref_code.replace('DSCRD-', '');
+  }
+
+  // ── 9b. Parse duration ──
+  const plan = txData.payment_method;
+  let durationDays = 1;
+  if (plan.includes('30')) durationDays = 30;
+  else if (plan.includes('14')) durationDays = 14;
+  else if (plan.includes('7')) durationDays = 7;
+
+  const planInfo = VIP_PRICES[txData.payment_method];
+
+  // ── 9c. Duplicate check ──
+  const { data: existingKeyForOrder } = await supabase
+    .from('license_keys')
+    .select('*')
+    .contains('transaction_proof', orderId)
+    .maybeSingle();
+
+  if (existingKeyForOrder) {
+    logger.info(`Order ${orderId} already has key generated — duplicate poll`);
+    return;
+  }
+
+  // ── 9d. Cek existing user ──
+  const { data: existingUser } = await supabase
+    .from('license_keys')
+    .select('*')
+    .eq('assigned_username', txData.username)
+    .eq('is_active', true)
+    .maybeSingle();
+
+  let finalKey;
+  let statusText;
+  let expiresAt;
+  let isExtension = false;
+
+  if (existingUser) {
+    const now = Date.now();
+    const isExpired = existingUser.expires_at && new Date(existingUser.expires_at).getTime() < now;
+
+    if (isExpired) {
+      // ── Expired → inactive + fresh key ──
+      await supabase.from('license_keys')
+        .update({ is_active: false })
+        .eq('id', existingUser.id);
+
+      logger.info(`Key ${existingUser.key_string} expired — marked inactive`);
+
+      finalKey = generateLicenseKey();
+      statusText = 'New Key (Expired Renewal)';
+      expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
+
+      await supabase.from('license_keys').insert([{
+        key_string:         finalKey,
+        assigned_username:  txData.username,
+        discord_id:         discordUserId,
+        is_active:          true,
+        duration_mode:      txData.payment_method,
+        duration_days:      durationDays,
+        expires_at:         expiresAt,
+        transaction_amount: txData.amount,
+        transaction_proof:  orderId,
+        allowed_modules:    ['all'],
+        note:               'Auto Payment via Polling (Fresh Key - Expired Renewal)',
+      }]);
+
+    } else {
+      // ── Active → EXTEND ──
+      isExtension = true;
+      finalKey = existingUser.key_string;
+      statusText = 'Renewed (Key Diperpanjang)';
+
+      const addMillis = durationDays * 24 * 60 * 60 * 1000;
+      const currentExp = new Date(existingUser.expires_at).getTime();
+      const baseTime = currentExp > now ? currentExp : now;
+      expiresAt = new Date(baseTime + addMillis).toISOString();
+
+      await supabase.from('license_keys').update({
+        expires_at:         expiresAt,
+        duration_days:      (existingUser.duration_days || 0) + durationDays,
+        transaction_amount: (Number(existingUser.transaction_amount) || 0) + Number(txData.amount),
+        transaction_proof:  `${existingUser.transaction_proof || ''} | ${orderId}`,
+        note:               `${existingUser.note || ''} [AutoExtend: +${durationDays}d]`,
+      }).eq('id', existingUser.id);
+    }
+
+  } else {
+    // ── New user ──
+    finalKey = generateLicenseKey();
+    statusText = 'New User (Fresh Key)';
+    expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
+
+    await supabase.from('license_keys').insert([{
+      key_string:         finalKey,
+      assigned_username:  txData.username,
+      discord_id:         discordUserId,
+      is_active:          true,
+      duration_mode:      txData.payment_method,
+      duration_days:      durationDays,
+      expires_at:         expiresAt,
+      transaction_amount: txData.amount,
+      transaction_proof:  orderId,
+      allowed_modules:    ['all'],
+      note:               'Auto Payment via Polling (Fresh Key)',
+    }]);
+  }
+
+  // ── 9e. Send DM & assign role ──
+  let dUser = null;
+  if (discordUserId) {
+    try {
+      dUser = await client.users.fetch(discordUserId);
+    } catch (fetchErr) {
+      logger.warn(`Cannot fetch Discord user ${discordUserId}: ${fetchErr.message}`);
+    }
+
+    if (dUser) {
+      const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
+
+      const dmEmbed = new EmbedBuilder()
+        .setColor('#6bff8f')
+        .setTitle('✅ **License Active**')
+        .setDescription([
+          '```',
+          finalKey,
+          '```',
+        ].join('\n'))
+        .addFields(
+          { name: '📌 Status',   value: statusText,                     inline: true },
+          { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,              inline: true },
+          { name: '📜 Script',   value: [
+            '```lua',
+            'loadstring(game:HttpGet("https://vip.motioncore.web.id"))()',
+            '```',
+          ].join('\n'), inline: false },
+        )
+        .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
+        .setTimestamp();
+
+      await dUser.send({ embeds: [dmEmbed] }).catch(dmErr => {
+        logger.warn(`Failed to DM user ${discordUserId}: ${dmErr.message}`);
+      });
+
+      logger.info(`DM sent to ${dUser.tag} with key ${finalKey}`);
+    }
+
+    // Assign VIP role
+    try {
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      const member = await guild.members.fetch(discordUserId);
+      if (member) {
+        await member.roles.add(process.env.VIP_ROLE_ID);
+        logger.info(`VIP role added to ${txData.username} (Discord: ${discordUserId})`);
+      }
+    } catch (roleErr) {
+      logger.warn(`Failed to assign VIP role: ${roleErr.message}`);
+    }
+  }
+
+  // ── 9f. Send webhooks ──
+  await sendTestiWebhook(txData, dUser);
+  await sendAdminLog(txData, finalKey, isExtension, planInfo?.label);
+
+  // ── 9g. Cleanup QRIS message ──
+  const pendingOrder = activeOrders.get(orderId);
+  if (pendingOrder && pendingOrder.interaction) {
+    try {
+      await pendingOrder.interaction.deleteReply();
+    } catch (cleanupErr) {
+      logger.debug(`QRIS cleanup for ${orderId}: ${cleanupErr.message}`);
+    }
+    activeOrders.delete(orderId);
+  }
+
+  logger.info(`Order ${orderId} completed successfully for ${txData.username}`);
+}
+
+// ─── 10. POLLING ENGINE ──────────────────────
+async function pollPendingPayments() {
+  try {
+    // Ambil semua transaksi pending dari Discord (ref_code LIKE 'DSCRD-%')
+    const { data: pendingTx, error } = await supabase
+      .from('transaction_logs')
+      .select('*')
+      .eq('status', 'pending')
+      .like('ref_code', 'DSCRD-%');
+
+    if (error) {
+      logger.error(`Poll query error: ${error.message}`);
+      return;
+    }
+
+    if (!pendingTx || pendingTx.length === 0) {
+      logger.debug('Poll: no pending Discord transactions');
+      return;
+    }
+
+    logger.debug(`Poll: checking ${pendingTx.length} pending transaction(s)`);
+
+    for (const tx of pendingTx) {
+      try {
+        // Cek status ke Pakasir API
+        const checkRes = await axios.get(
+          'https://app.pakasir.com/api/transactiondetail',
+          {
+            params: {
+              project:  process.env.PAKASIR_SLUG,
+              amount:   tx.amount,
+              order_id: tx.order_id,
+              api_key:  process.env.PAKASIR_API_KEY,
+            },
+            timeout: 10000,
+          }
+        );
+
+        const checkData = checkRes.data;
+
+        if (checkData.transaction && checkData.transaction.status === 'completed') {
+          logger.info(`Poll: Order ${tx.order_id} is PAID — processing...`);
+
+          // Atomic claim: only this poll wins
+          const { data: claimed, error: claimErr } = await supabase
+            .from('transaction_logs')
+            .update({ status: 'completed' })
+            .eq('order_id', tx.order_id)
+            .eq('status', 'pending')
+            .select()
+            .single();
+
+          if (claimErr) {
+            logger.error(`Poll claim error for ${tx.order_id}: ${claimErr.message}`);
+            continue;
+          }
+
+          if (!claimed) {
+            logger.info(`Poll: Order ${tx.order_id} already claimed by another process`);
+            continue;
+          }
+
+          // Process payment
+          await processPayment(claimed);
+
+        } else {
+          logger.debug(`Poll: Order ${tx.order_id} still pending (Pakasir: ${checkData.transaction?.status || 'unknown'})`);
+        }
+      } catch (txErr) {
+        logger.debug(`Poll check failed for ${tx.order_id}: ${txErr.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`Poll engine error: ${err.message}`);
+  }
+}
+
+// ─── 11. DISCORD INTERACTIONS ─────────────────
 client.on('interactionCreate', async (interaction) => {
   try {
-    // ── 9a. /setup-vip ──────────────────────
+    // ── 11a. /setup-vip ─────────────────────
     if (interaction.isChatInputCommand() && interaction.commandName === COMMAND_NAME) {
       if (!interaction.memberPermissions.has('Administrator')) {
         return interaction.reply({
@@ -199,7 +437,6 @@ client.on('interactionCreate', async (interaction) => {
           });
       }
 
-      // ── Tombol aksi ──
       const actionRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId('buy_vip')
@@ -212,7 +449,6 @@ client.on('interactionCreate', async (interaction) => {
           .setStyle(ButtonStyle.Secondary),
       );
 
-      // ── Row 2: Support ──
       const extraRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setLabel('📞 Support')
@@ -246,13 +482,12 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // ── 9b. Tombol Beli → Modal (RadioGroup + TextInput) ──
+    // ── 11b. Tombol Beli → Modal ──
     if (interaction.isButton() && interaction.customId === 'buy_vip') {
       const modal = new ModalBuilder()
         .setCustomId('modal_order_v2')
         .setTitle('Motion Core • Beli Lisensi');
 
-      // ── RadioGroup: pilih paket ──
       const radioGroup = new RadioGroupBuilder()
         .setCustomId('package_radio')
         .setRequired(true)
@@ -269,7 +504,6 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription('Durasi lisensi yang diinginkan')
         .setRadioGroupComponent(radioGroup);
 
-      // ── TextInput: username ──
       const usernameInput = new TextInputBuilder()
         .setCustomId('roblox_username')
         .setPlaceholder('Masukkan username Roblox kamu')
@@ -288,14 +522,12 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // ── 9d. Modal Submit → QRIS ────────────
+    // ── 11c. Modal Submit → QRIS ────────────
     if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_order_')) {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-      // Ambil paket dari RadioGroup (V2) atau dari custom_id (legacy)
       let plan;
       if (interaction.customId === 'modal_order_v2') {
-        // V2: cari nilai RadioGroup — Label punya .component (singular), ActionRow punya .components (plural)
         const radioWrapper = interaction.components.find(c => {
           const children = c.component ? [c.component] : (c.components ?? []);
           return children.some(sub => sub.customId === 'package_radio');
@@ -303,7 +535,6 @@ client.on('interactionCreate', async (interaction) => {
         const children = radioWrapper?.component ? [radioWrapper.component] : (radioWrapper?.components ?? []);
         plan = children.find(sub => sub.customId === 'package_radio')?.value;
       } else {
-        // Legacy: dari custom_id (backward compat)
         plan = interaction.customId.replace('modal_order_', '');
       }
 
@@ -376,17 +607,20 @@ client.on('interactionCreate', async (interaction) => {
           .setTimestamp();
 
         await interaction.editReply({ embeds: [embedQris], files: [attachment] });
-        logger.info(
-          `Order ${orderId}: ${robloxUsername} → ${packageInfo.label} (Rp${packageInfo.price})`
-        );
+        logger.info(`Order ${orderId}: ${robloxUsername} → ${packageInfo.label} (Rp${packageInfo.price})`);
 
-        // Track for webhook cleanup
-        activeOrders.set(orderId, interaction);
+        // Track for cleanup
+        activeOrders.set(orderId, {
+          discordUserId,
+          channelId: interaction.channelId,
+          plan: plan,
+          interaction,
+        });
+
+        // QRIS expiry notification (15 menit)
         setTimeout(() => {
           activeOrders.delete(orderId);
 
-          // ── Notifikasi QRIS expired ──
-          // Cek di DB apakah masih pending
           supabase
             .from('transaction_logs')
             .select('status')
@@ -414,7 +648,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // ── 9e. Tombol: Cek Status ───────────
+    // ── 11d. Tombol: Cek Status ───────────
     if (interaction.isButton() && interaction.customId === 'cek_status') {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -451,7 +685,6 @@ client.on('interactionCreate', async (interaction) => {
 
   } catch (err) {
     logger.error(`Unhandled interaction error: ${err.message}`, err.stack);
-    // Try to notify user if possible
     if (interaction.deferred || interaction.replied) {
       interaction.editReply('❌ Terjadi kesalahan internal. Silakan coba lagi.').catch(() => {});
     } else {
@@ -460,341 +693,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ─── 10. HEALTH CHECK ────────────────────────
-app.get('/', (req, res) => {
-  res.json({
-    status:  'ok',
-    service: 'MotionCore Bot',
-    version: '1.2.0',
-    uptime:  Math.floor(process.uptime()),
-    orders:  activeOrders.size,
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// ─── 11. WEBHOOK: PAKASIR PAYMENT CALLBACK ───
-app.post('/webhook/pakasir', async (req, res) => {
-  // ── 11a. IP whitelist check ──────────────
-  const clientIp = req.ip || req.connection.remoteAddress;
-  if (PK_ALLOWED_IPS.length > 0 && !PK_ALLOWED_IPS.includes(clientIp)) {
-    logger.warn(`Webhook access denied from IP: ${clientIp}`);
-    return res.status(403).json({ status: 'forbidden', message: 'IP not allowed' });
-  }
-
-  const { order_id, status } = req.body;
-
-  if (!order_id) {
-    return res.status(400).json({ status: 'error', message: 'Missing order_id' });
-  }
-
-  // Only process completed/paid/success statuses
-  if (status !== 'completed' && status !== 'paid' && status !== 'success') {
-    return res.status(200).json({ status: 'ignored', message: `Status "${status}" not actionable` });
-  }
-
-  logger.info(`Webhook received for order ${order_id}`);
-
-  try {
-    // ── 11b. Atomic claim: ONLY update if status='pending' ──
-    // This prevents race conditions — if two webhooks arrive simultaneously,
-    // only the first UPDATE succeeds; the second affects 0 rows.
-    const { data: claimData, error: claimError } = await supabase
-      .from('transaction_logs')
-      .update({ status: 'completed' })
-      .eq('order_id', order_id)
-      .eq('status', 'pending')
-      .select()
-      .single();
-
-    if (claimError) {
-      logger.error(`DB claim error for ${order_id}: ${claimError.message}`);
-      return res.status(500).json({ status: 'error', message: 'Database error' });
-    }
-
-    if (!claimData) {
-      // Already processed or doesn't exist — safe to ignore
-      logger.info(`Order ${order_id} already processed or not found — ignored`);
-      return res.status(200).json({ status: 'ignored', message: 'Already processed' });
-    }
-
-    const txData = claimData; // claimData has all transaction fields
-
-    // ── 11c. Extract Discord ID from ref_code ──
-    let discordUserId = null;
-    if (txData.ref_code && txData.ref_code.startsWith('DSCRD-')) {
-      discordUserId = txData.ref_code.replace('DSCRD-', '');
-    }
-
-    if (!discordUserId) {
-      logger.warn(`Order ${order_id} has no Discord ID in ref_code — key generated but no DM sent`);
-    }
-
-    // ── 11d. License key logic (Worker-compatible) ──
-    // Parse duration dari plan string (sama seperti Worker)
-    const plan = txData.payment_method;
-    let durationDays = 1;
-    if (plan.includes('30')) durationDays = 30;
-    else if (plan.includes('14')) durationDays = 14;
-    else if (plan.includes('7')) durationDays = 7;
-
-    const planInfo = VIP_PRICES[txData.payment_method];
-
-    // Cek apakah key sudah pernah di-generate untuk order ini (duplicate check)
-    const { data: existingKeyForOrder } = await supabase
-      .from('license_keys')
-      .select('*')
-      .contains('transaction_proof', order_id)
-      .maybeSingle();
-
-    if (existingKeyForOrder) {
-      logger.info(`Order ${order_id} already has key generated — duplicate callback`);
-      return res.status(200).json({ status: 'success', message: 'Already processed' });
-    }
-
-    // Cari existing user
-    const { data: existingUser } = await supabase
-      .from('license_keys')
-      .select('*')
-      .eq('assigned_username', txData.username)
-      .eq('is_active', true)
-      .maybeSingle();
-
-    let finalKey;
-    let statusText;
-    let expiresAt;
-    let isExtension = false;
-
-    if (existingUser) {
-      const now = Date.now();
-      const isExpired = existingUser.expires_at && new Date(existingUser.expires_at).getTime() < now;
-
-      if (isExpired) {
-        // ── Key expired → mark inactive + buat key baru ──
-        await supabase.from('license_keys')
-          .update({ is_active: false })
-          .eq('id', existingUser.id);
-
-        logger.info(`Key ${existingUser.key_string} expired — marked inactive, creating new`);
-
-        // Buat key baru (fresh)
-        finalKey = generateLicenseKey();
-        statusText = 'New Key (Expired Renewal)';
-        expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
-
-        await supabase.from('license_keys').insert([{
-          key_string:         finalKey,
-          assigned_username:  txData.username,
-          discord_id:         discordUserId,
-          is_active:          true,
-          duration_mode:      txData.payment_method,
-          duration_days:      durationDays,
-          expires_at:         expiresAt,
-          transaction_amount: txData.amount,
-          transaction_proof:  order_id,
-          allowed_modules:    ['all'],
-          note:               'Auto Payment via Pakasir (Fresh Key - Expired Renewal)',
-        }]);
-
-        logger.info(`New KEY (expired renewal): ${finalKey} for ${txData.username} (${durationDays} days)`);
-
-      } else {
-        // ── Key still active → EXTEND ──
-        isExtension = true;
-        finalKey = existingUser.key_string;
-        statusText = 'Renewed (Key Diperpanjang)';
-
-        const addMillis = durationDays * 24 * 60 * 60 * 1000;
-        const currentExp = new Date(existingUser.expires_at).getTime();
-        const baseTime = currentExp > now ? currentExp : now;
-        expiresAt = new Date(baseTime + addMillis).toISOString();
-
-        const updateData = {
-          expires_at:         expiresAt,
-          duration_days:      (existingUser.duration_days || 0) + durationDays,
-          transaction_amount: (Number(existingUser.transaction_amount) || 0) + Number(txData.amount),
-          transaction_proof:  `${existingUser.transaction_proof || ''} | ${order_id}`,
-          note:               `${existingUser.note || ''} [AutoExtend: +${durationDays}d]`,
-        };
-
-        await supabase.from('license_keys').update(updateData).eq('id', existingUser.id);
-
-        logger.info(`Key EXTENDED: ${finalKey} for ${txData.username} (+${durationDays} days)`);
-      }
-
-    } else {
-      // ── NEW user → fresh key ──
-      finalKey = generateLicenseKey();
-      statusText = 'New User (Fresh Key)';
-      expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
-
-      await supabase.from('license_keys').insert([{
-        key_string:         finalKey,
-        assigned_username:  txData.username,
-        discord_id:         discordUserId,
-        is_active:          true,
-        duration_mode:      txData.payment_method,
-        duration_days:      durationDays,
-        expires_at:         expiresAt,
-        transaction_amount: txData.amount,
-        transaction_proof:  order_id,
-        allowed_modules:    ['all'],
-        note:               'Auto Payment via Pakasir (Fresh Key)',
-      }]);
-
-      logger.info(`New KEY: ${finalKey} for ${txData.username} (${durationDays} days)`);
-    }
-
-    // ── 11e. Send DM & assign role ──
-    let dUser = null;
-    if (discordUserId) {
-      try {
-        dUser = await client.users.fetch(discordUserId);
-      } catch (fetchErr) {
-        logger.warn(`Cannot fetch Discord user ${discordUserId}: ${fetchErr.message}`);
-      }
-
-      if (dUser) {
-        const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
-
-        const dmEmbed = new EmbedBuilder()
-          .setColor('#6bff8f')
-          .setTitle('✅ **License Active**')
-          .setDescription([
-            '```',
-            finalKey,
-            '```',
-          ].join('\n'))
-          .addFields(
-            { name: '📌 Status',   value: statusText,                     inline: true },
-            { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,              inline: true },
-            { name: '📜 Script',   value: [
-              '```lua',
-              'loadstring(game:HttpGet("https://vip.motioncore.web.id"))()',
-              '```',
-            ].join('\n'), inline: false },
-          )
-          .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
-          .setTimestamp();
-
-        await dUser.send({ embeds: [dmEmbed] }).catch(dmErr => {
-          logger.warn(`Failed to DM user ${discordUserId}: ${dmErr.message}`);
-          // DM failed — user likely has DMs closed.
-          // The role is still assigned below so they can access VIP channels.
-        });
-
-        logger.info(`DM sent to ${dUser.tag} with key ${finalKey}`);
-      }
-
-      // Assign VIP role
-      try {
-        const guild = await client.guilds.fetch(process.env.GUILD_ID);
-        const member = await guild.members.fetch(discordUserId);
-        if (member) {
-          await member.roles.add(process.env.VIP_ROLE_ID);
-          logger.info(`VIP role added to ${txData.username} (Discord: ${discordUserId})`);
-        }
-      } catch (roleErr) {
-        logger.warn(`Failed to assign VIP role: ${roleErr.message}`);
-      }
-    }
-
-    // ── 11f. Send testimonial webhook + admin transcript ──
-    await sendTestiWebhook(txData, dUser);
-    await sendAdminLog(txData, finalKey, isExtension, planInfo?.label);
-
-    // ── 11g. Cleanup: remove QRIS message ──
-    const pendingInteraction = activeOrders.get(order_id);
-    if (pendingInteraction) {
-      try {
-        await pendingInteraction.deleteReply();
-      } catch (cleanupErr) {
-        // Interaction might have expired — that's okay
-        logger.debug(`QRIS cleanup for ${order_id}: ${cleanupErr.message}`);
-      }
-      activeOrders.delete(order_id);
-    }
-
-    logger.info(`Order ${order_id} completed successfully for ${txData.username}`);
-    return res.status(200).json({ status: 'success', message: 'License activated' });
-
-  } catch (err) {
-    logger.error(`Webhook processing error for ${order_id}: ${err.message}`, err.stack);
-    return res.status(500).json({ status: 'error', message: 'Internal server error' });
-  }
-});
-
-// ─── 12. GRACEFUL SHUTDOWN ──────────────────
-async function gracefulShutdown(signal) {
-  logger.info(`${signal} received — starting graceful shutdown...`);
-
-  // Stop accepting new requests
-  // (In production with a load balancer, you'd first remove from rotation)
-
-  // Destroy Discord client (clean WS disconnect)
-  if (client.isReady()) {
-    await client.destroy();
-    logger.info('Discord client disconnected');
-  }
-
-  // Exit
-  logger.info('Shutdown complete');
-  process.exit(0);
-}
-
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-
-// Handle uncaught errors gracefully (don't crash the process)
-process.on('uncaughtException', (err) => {
-  logger.error('UNCAUGHT EXCEPTION:', err.message, err.stack);
-});
-
-process.on('unhandledRejection', (reason) => {
-  logger.error('UNHANDLED REJECTION:', reason);
-});
-
-// ─── 13. STARTUP ─────────────────────────────
-// Start Express webhook server
-const server = app.listen(PORT, () => {
-  logger.info(`Webhook server listening on port ${PORT}`);
-  logger.info(`Allowed Pakasir IPs: ${PK_ALLOWED_IPS.length > 0 ? PK_ALLOWED_IPS.join(', ') : 'ALL (no filter)'}`);
-});
-
-// Login Discord bot
-client.once('clientReady', async () => {
-  logger.info(`Bot ${client.user.tag} is online! (${client.guilds.cache.size} guilds)`);
-
-  // Register slash command globally (or per-guild for testing)
-  // For production, use global registration so it works across all servers
-  if (process.env.NODE_ENV === 'production') {
-    try {
-      await client.application.commands.create({
-        name: COMMAND_NAME,
-        description: 'Memunculkan menu order VIP Motion Core (Hanya Admin)',
-      });
-      logger.info('Slash command registered globally');
-    } catch (err) {
-      logger.error('Failed to register global slash command:', err.message);
-    }
-  } else if (process.env.GUILD_ID) {
-    // Development mode — register on specific guild for instant updates
-    try {
-      const guild = await client.guilds.fetch(process.env.GUILD_ID);
-      await guild.commands.create({
-        name: COMMAND_NAME,
-        description: 'Memunculkan menu order VIP Motion Core (Hanya Admin)',
-      });
-      logger.info(`Slash command registered on guild ${process.env.GUILD_ID}`);
-    } catch (err) {
-      logger.error('Failed to register guild slash command:', err.message);
-    }
-  }
-});
-
-// ─── 14. WEEKLY CRON: Hapus role expired ──────
+// ─── 12. WEEKLY CRON: Hapus role expired ──────
 const WEEKLY_MS = 7 * 24 * 60 * 60 * 1000; // 7 hari
 
 async function cleanupExpiredKeys() {
@@ -821,12 +720,10 @@ async function cleanupExpiredKeys() {
     logger.info(`Found ${expiredKeys.length} expired key(s)`);
 
     for (const key of expiredKeys) {
-      // Set inactive
       await supabase.from('license_keys')
         .update({ is_active: false })
         .eq('id', key.id);
 
-      // Hapus role Discord
       if (key.discord_id) {
         try {
           const guild = await client.guilds.fetch(process.env.GUILD_ID);
@@ -835,7 +732,6 @@ async function cleanupExpiredKeys() {
             await member.roles.remove(process.env.VIP_ROLE_ID);
             logger.info(`Role removed from ${key.discord_id} (expired key)`);
 
-            // DM notifikasi
             await member.send({
               content: '⏳ **Lisensi VIP kamu sudah expired.**\nSilakan perpanjang melalui channel <#1523684804728717383> agar tetap bisa menggunakan script.',
             }).catch(() => {});
@@ -852,12 +748,68 @@ async function cleanupExpiredKeys() {
   }
 }
 
-// Jalankan setiap minggu setelah bot online
-setTimeout(() => {
-  cleanupExpiredKeys();
-  setInterval(cleanupExpiredKeys, WEEKLY_MS);
-  logger.info(`⏰ Weekly cleanup scheduled (every ${WEEKLY_MS / 86400000} days)`);
-}, 10000); // Tunggu 10 detik setelah startup
+// ─── 13. GRACEFUL SHUTDOWN ──────────────────
+async function gracefulShutdown(signal) {
+  logger.info(`${signal} received — starting graceful shutdown...`);
+  if (client.isReady()) {
+    await client.destroy();
+    logger.info('Discord client disconnected');
+  }
+  logger.info('Shutdown complete');
+  process.exit(0);
+}
+
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+process.on('uncaughtException', (err) => {
+  logger.error('UNCAUGHT EXCEPTION:', err.message, err.stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('UNHANDLED REJECTION:', reason);
+});
+
+// ─── 14. STARTUP ─────────────────────────────
+client.once('ready', async () => {
+  logger.info(`Bot ${client.user.tag} is online! (${client.guilds.cache.size} guilds)`);
+
+  // Register slash command
+  if (process.env.NODE_ENV === 'production') {
+    try {
+      await client.application.commands.create({
+        name: COMMAND_NAME,
+        description: 'Memunculkan menu order VIP Motion Core (Hanya Admin)',
+      });
+      logger.info('Slash command registered globally');
+    } catch (err) {
+      logger.error('Failed to register global slash command:', err.message);
+    }
+  } else if (process.env.GUILD_ID) {
+    try {
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      await guild.commands.create({
+        name: COMMAND_NAME,
+        description: 'Memunculkan menu order VIP Motion Core (Hanya Admin)',
+      });
+      logger.info(`Slash command registered on guild ${process.env.GUILD_ID}`);
+    } catch (err) {
+      logger.error('Failed to register guild slash command:', err.message);
+    }
+  }
+
+  // Start polling engine
+  logger.info(`⏰ Starting payment poller (every ${POLL_INTERVAL_MS / 1000}s)`);
+  pollPendingPayments(); // Run immediately
+  setInterval(pollPendingPayments, POLL_INTERVAL_MS);
+
+  // Start weekly cleanup (10s delay)
+  setTimeout(() => {
+    cleanupExpiredKeys();
+    setInterval(cleanupExpiredKeys, WEEKLY_MS);
+    logger.info(`⏰ Weekly cleanup scheduled (every ${WEEKLY_MS / 86400000} days)`);
+  }, 10000);
+});
 
 client.login(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN)
   .then(() => logger.info('Discord login successful'))
@@ -865,5 +817,3 @@ client.login(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN)
     logger.error('Discord login FAILED:', err.message);
     process.exit(1);
   });
-
-module.exports = { app, server, client };

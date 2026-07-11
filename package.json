@@ -1,11 +1,10 @@
 {
   "name": "motioncore-bot-discord",
-  "version": "1.2.0",
-  "description": "Motion Core VIP License - Auto Payment & Delivery Discord Bot (Components V2)",
+  "version": "2.0.0",
+  "description": "Motion Core VIP License - Auto Payment & Delivery Discord Bot (Polling-based, no Express)",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "test-webhook": "node test-webhook.js"
+    "start": "node index.js"
   },
   "keywords": ["discord", "bot", "motion-core", "vip", "license", "qris"],
   "author": "Motion Core",
@@ -18,7 +17,6 @@
     "axios": "^1.18.1",
     "discord.js": "^14.26.4",
     "dotenv": "^17.4.2",
-    "express": "^4.21.0",
     "qrcode": "^1.5.4"
   }
 }
