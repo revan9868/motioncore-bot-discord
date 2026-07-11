@@ -258,24 +258,57 @@ async function processPayment(txData) {
     }
 
   } else {
-    // ── New user ──
-    finalKey = generateLicenseKey();
-    statusText = 'New User (Fresh Key)';
-    expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
+    // ── Double-check: apakah bener-bener gak ada active key? ──
+    // Race condition: 2 order untuk user yg sama di-poll tick yg sama.
+    // Key dari order pertama mungkin belum ke-detect oleh SELECT kedua.
+    const { data: recheck } = await supabase
+      .from('license_keys')
+      .select('*')
+      .eq('assigned_username', txData.username)
+      .eq('is_active', true)
+      .maybeSingle();
 
-    await supabase.from('license_keys').insert([{
-      key_string:         finalKey,
-      assigned_username:  txData.username,
-      discord_id:         discordUserId,
-      is_active:          true,
-      duration_mode:      txData.payment_method,
-      duration_days:      durationDays,
-      expires_at:         expiresAt,
-      transaction_amount: txData.amount,
-      transaction_proof:  orderId,
-      allowed_modules:    ['all'],
-      note:               'Auto Payment via Polling (Fresh Key)',
-    }]);
+    if (recheck) {
+      // Ketemu! Extend aja
+      isExtension = true;
+      finalKey = recheck.key_string;
+      statusText = 'Renewed (Key Diperpanjang)';
+
+      const now = Date.now();
+      const addMillis = durationDays * 24 * 60 * 60 * 1000;
+      const currentExp = new Date(recheck.expires_at).getTime();
+      const baseTime = currentExp > now ? currentExp : now;
+      expiresAt = new Date(baseTime + addMillis).toISOString();
+
+      await supabase.from('license_keys').update({
+        expires_at:         expiresAt,
+        duration_days:      (recheck.duration_days || 0) + durationDays,
+        transaction_amount: (Number(recheck.transaction_amount) || 0) + Number(txData.amount),
+        transaction_proof:  `${recheck.transaction_proof || ''} | ${orderId}`,
+        note:               `${recheck.note || ''} [AutoExtend: +${durationDays}d]`,
+      }).eq('id', recheck.id);
+
+      logger.info(`Key EXTENDED (double-check catch): ${finalKey} for ${txData.username} (+${durationDays} days)`);
+    } else {
+      // ── Beneran user baru ──
+      finalKey = generateLicenseKey();
+      statusText = 'New User (Fresh Key)';
+      expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
+
+      await supabase.from('license_keys').insert([{
+        key_string:         finalKey,
+        assigned_username:  txData.username,
+        discord_id:         discordUserId,
+        is_active:          true,
+        duration_mode:      txData.payment_method,
+        duration_days:      durationDays,
+        expires_at:         expiresAt,
+        transaction_amount: txData.amount,
+        transaction_proof:  orderId,
+        allowed_modules:    ['all'],
+        note:               'Auto Payment via Polling (Fresh Key)',
+      }]);
+    }
   }
 
   // ── 9e. Send DM & assign role ──
