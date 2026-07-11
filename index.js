@@ -183,11 +183,12 @@ async function processPayment(txData) {
   const planInfo = VIP_PRICES[txData.payment_method];
 
   // ── 9c. Duplicate check ──
-  const { data: existingKeyForOrder } = await supabase
+  const { data: dupKeys } = await supabase
     .from('license_keys')
     .select('*')
     .contains('transaction_proof', orderId)
-    .maybeSingle();
+    .limit(1);
+  const existingKeyForOrder = dupKeys?.[0] || null;
 
   if (existingKeyForOrder) {
     logger.info(`Order ${orderId} already has key generated — duplicate poll`);
@@ -195,12 +196,13 @@ async function processPayment(txData) {
   }
 
   // ── 9d. Cek existing user ──
-  const { data: existingUser } = await supabase
+  const { data: existingUserRows } = await supabase
     .from('license_keys')
     .select('*')
     .eq('assigned_username', txData.username)
     .eq('is_active', true)
-    .maybeSingle();
+    .limit(1);
+  const existingUser = existingUserRows?.[0] || null;
 
   let finalKey;
   let statusText;
@@ -261,12 +263,13 @@ async function processPayment(txData) {
     // ── Double-check: apakah bener-bener gak ada active key? ──
     // Race condition: 2 order untuk user yg sama di-poll tick yg sama.
     // Key dari order pertama mungkin belum ke-detect oleh SELECT kedua.
-    const { data: recheck } = await supabase
+    const { data: recheckRows } = await supabase
       .from('license_keys')
       .select('*')
       .eq('assigned_username', txData.username)
       .eq('is_active', true)
-      .maybeSingle();
+      .limit(1);
+    const recheck = recheckRows?.[0] || null;
 
     if (recheck) {
       // Ketemu! Extend aja
