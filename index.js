@@ -163,7 +163,7 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
   }
 }
 
-// ─── 9. PROCESS PAYMENT (shared: called by polling) ──
+// ─── 9. PROCESS PAYMENT (Worker-style: simple, reliable) ──
 async function processPayment(txData) {
   const orderId = txData.order_id;
 
@@ -182,206 +182,132 @@ async function processPayment(txData) {
 
   const planInfo = VIP_PRICES[txData.payment_method];
 
-  // ── 9c. Duplicate check ──
+  // ── 9c. Anti double claim (Worker-style) ──
   const { data: dupKeys } = await supabase
     .from('license_keys')
     .select('*')
     .contains('transaction_proof', orderId)
     .limit(1);
-  const existingKeyForOrder = dupKeys?.[0] || null;
 
-  if (existingKeyForOrder) {
-    logger.info(`Order ${orderId} already has key generated — duplicate poll`);
+  if (dupKeys?.[0]) {
+    logger.info(`Order ${orderId} already has key — duplicate poll`);
     return;
   }
 
-  // ── 9d. Cek existing user ──
-  const { data: existingUserRows } = await supabase
+  // ── 9d. Mark completed (simple PATCH, like Worker) ──
+  await supabase
+    .from('transaction_logs')
+    .update({ status: 'completed' })
+    .eq('order_id', orderId)
+    .eq('status', 'pending');
+
+  // ── 9e. Cek existing user (like Worker) ──
+  const { data: existingRows } = await supabase
     .from('license_keys')
     .select('*')
     .eq('assigned_username', txData.username)
     .eq('is_active', true)
     .limit(1);
-  const existingUser = existingUserRows?.[0] || null;
 
-  let finalKey;
-  let statusText;
-  let expiresAt;
+  let finalKey = '', statusText = '';
+  let expiresAt = '';
   let isExtension = false;
+  let shouldCreateNew = true; // Worker-style: default buat baru
 
-  if (existingUser) {
+  if (existingRows?.[0]) {
+    const user = existingRows[0];
     const now = Date.now();
-    const isExpired = existingUser.expires_at && new Date(existingUser.expires_at).getTime() < now;
+    const isExpired = user.expires_at && new Date(user.expires_at).getTime() < now;
 
     if (isExpired) {
-      // ── Expired → inactive + fresh key ──
+      // User expired → matikan lama, buat baru (shouldCreateNew tetap true)
       await supabase.from('license_keys')
-        .update({ is_active: false })
-        .eq('id', existingUser.id);
-
-      logger.info(`Key ${existingUser.key_string} expired — marked inactive`);
-
-      finalKey = generateLicenseKey();
-      statusText = 'New Key (Expired Renewal)';
-      expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
-
-      await supabase.from('license_keys').insert([{
-        key_string:         finalKey,
-        assigned_username:  txData.username,
-        discord_id:         discordUserId,
-        is_active:          true,
-        duration_mode:      txData.payment_method,
-        duration_days:      durationDays,
-        expires_at:         expiresAt,
-        transaction_amount: txData.amount,
-        transaction_proof:  orderId,
-        allowed_modules:    ['all'],
-        note:               'Auto Payment via Polling (Fresh Key - Expired Renewal)',
-      }]);
-
+        .update({ is_active: false }).eq('key_string', user.key_string);
+      logger.info(`Key ${user.key_string} expired — marked inactive`);
     } else {
-      // ── Active → EXTEND ──
+      // User aktif → EXTEND
+      shouldCreateNew = false;
       isExtension = true;
-      finalKey = existingUser.key_string;
+      finalKey = user.key_string;
       statusText = 'Renewed (Key Diperpanjang)';
 
       const addMillis = durationDays * 24 * 60 * 60 * 1000;
-      const currentExp = new Date(existingUser.expires_at).getTime();
+      const currentExp = new Date(user.expires_at).getTime();
       const baseTime = currentExp > now ? currentExp : now;
       expiresAt = new Date(baseTime + addMillis).toISOString();
 
       await supabase.from('license_keys').update({
         expires_at:         expiresAt,
-        duration_days:      (existingUser.duration_days || 0) + durationDays,
-        transaction_amount: (Number(existingUser.transaction_amount) || 0) + Number(txData.amount),
-        transaction_proof:  `${existingUser.transaction_proof || ''} | ${orderId}`,
-        note:               `${existingUser.note || ''} [AutoExtend: +${durationDays}d]`,
-      }).eq('id', existingUser.id);
-    }
-
-  } else {
-    // ── Double-check: apakah bener-bener gak ada active key? ──
-    // Race condition: 2 order untuk user yg sama di-poll tick yg sama.
-    // Key dari order pertama mungkin belum ke-detect oleh SELECT kedua.
-    const { data: recheckRows } = await supabase
-      .from('license_keys')
-      .select('*')
-      .eq('assigned_username', txData.username)
-      .eq('is_active', true)
-      .limit(1);
-    const recheck = recheckRows?.[0] || null;
-
-    if (recheck) {
-      // Ketemu! Extend aja
-      isExtension = true;
-      finalKey = recheck.key_string;
-      statusText = 'Renewed (Key Diperpanjang)';
-
-      const now = Date.now();
-      const addMillis = durationDays * 24 * 60 * 60 * 1000;
-      const currentExp = new Date(recheck.expires_at).getTime();
-      const baseTime = currentExp > now ? currentExp : now;
-      expiresAt = new Date(baseTime + addMillis).toISOString();
-
-      await supabase.from('license_keys').update({
-        expires_at:         expiresAt,
-        duration_days:      (recheck.duration_days || 0) + durationDays,
-        transaction_amount: (Number(recheck.transaction_amount) || 0) + Number(txData.amount),
-        transaction_proof:  `${recheck.transaction_proof || ''} | ${orderId}`,
-        note:               `${recheck.note || ''} [AutoExtend: +${durationDays}d]`,
-      }).eq('id', recheck.id);
-
-      logger.info(`Key EXTENDED (double-check catch): ${finalKey} for ${txData.username} (+${durationDays} days)`);
-    } else {
-      // ── Beneran user baru ──
-      finalKey = generateLicenseKey();
-      statusText = 'New User (Fresh Key)';
-      expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
-
-      await supabase.from('license_keys').insert([{
-        key_string:         finalKey,
-        assigned_username:  txData.username,
-        discord_id:         discordUserId,
-        is_active:          true,
-        duration_mode:      txData.payment_method,
-        duration_days:      durationDays,
-        expires_at:         expiresAt,
-        transaction_amount: txData.amount,
-        transaction_proof:  orderId,
-        allowed_modules:    ['all'],
-        note:               'Auto Payment via Polling (Fresh Key)',
-      }]);
+        duration_days:      (user.duration_days || 0) + durationDays,
+        transaction_amount: (Number(user.transaction_amount) || 0) + Number(txData.amount),
+        transaction_proof:  `${user.transaction_proof || ''} | ${orderId}`,
+        note:               `${user.note || ''} [AutoExtend: +${durationDays}d]`,
+      }).eq('key_string', user.key_string);
     }
   }
 
-  // ── 9e. Send DM & assign role ──
+  if (shouldCreateNew) {
+    // User baru ATAU expired → buat key baru
+    finalKey = generateLicenseKey();
+    statusText = existingRows?.[0] ? 'New Key (Expired Renewal)' : 'New User (Fresh Key)';
+    expiresAt = new Date(Date.now() + durationDays * 86400000).toISOString();
+
+    await supabase.from('license_keys').insert([{
+      key_string:         finalKey,
+      assigned_username:  txData.username,
+      discord_id:         discordUserId,
+      is_active:          true,
+      duration_mode:      txData.payment_method,
+      duration_days:      durationDays,
+      expires_at:         expiresAt,
+      transaction_amount: txData.amount,
+      transaction_proof:  orderId,
+      allowed_modules:    ['all'],
+      note:               'Auto Payment via Polling (Fresh Key)',
+    }]);
+  }
+
+  // ── 9f. Send DM & assign role ──
   let dUser = null;
   if (discordUserId) {
-    try {
-      dUser = await client.users.fetch(discordUserId);
-    } catch (fetchErr) {
-      logger.warn(`Cannot fetch Discord user ${discordUserId}: ${fetchErr.message}`);
-    }
-
+    try { dUser = await client.users.fetch(discordUserId); } catch (_) {}
     if (dUser) {
       const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
-
-      const dmEmbed = new EmbedBuilder()
-        .setColor('#6bff8f')
-        .setTitle('✅ **License Active**')
-        .setDescription([
-          '```',
-          finalKey,
-          '```',
-        ].join('\n'))
-        .addFields(
-          { name: '📌 Status',   value: statusText,                     inline: true },
-          { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,              inline: true },
-          { name: '📜 Script',   value: [
-            '```lua',
-            'loadstring(game:HttpGet("https://vip.motioncore.web.id"))()',
-            '```',
-          ].join('\n'), inline: false },
-        )
-        .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
-        .setTimestamp();
-
-      await dUser.send({ embeds: [dmEmbed] }).catch(dmErr => {
-        logger.warn(`Failed to DM user ${discordUserId}: ${dmErr.message}`);
-      });
-
+      await dUser.send({
+        embeds: [new EmbedBuilder()
+          .setColor('#6bff8f')
+          .setTitle('✅ **License Active**')
+          .setDescription(['```', finalKey, '```'].join('\n'))
+          .addFields(
+            { name: '📌 Status',   value: statusText,                inline: true },
+            { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,         inline: true },
+            { name: '📜 Script',   value: '```lua\nloadstring(game:HttpGet("https://vip.motioncore.web.id"))()\n```', inline: false },
+          )
+          .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
+          .setTimestamp()
+        ],
+      }).catch(() => {});
       logger.info(`DM sent to ${dUser.tag} with key ${finalKey}`);
     }
-
-    // Assign VIP role
     try {
       const guild = await client.guilds.fetch(process.env.GUILD_ID);
       const member = await guild.members.fetch(discordUserId);
-      if (member) {
-        await member.roles.add(process.env.VIP_ROLE_ID);
-        logger.info(`VIP role added to ${txData.username} (Discord: ${discordUserId})`);
-      }
-    } catch (roleErr) {
-      logger.warn(`Failed to assign VIP role: ${roleErr.message}`);
-    }
+      if (member) await member.roles.add(process.env.VIP_ROLE_ID);
+    } catch (_) {}
   }
 
-  // ── 9f. Send webhooks ──
+  // ── 9g. Webhooks ──
   await sendTestiWebhook(txData, dUser);
   await sendAdminLog(txData, finalKey, isExtension, planInfo?.label);
 
-  // ── 9g. Cleanup QRIS message ──
+  // ── 9h. Cleanup QRIS ──
   const pendingOrder = activeOrders.get(orderId);
-  if (pendingOrder && pendingOrder.interaction) {
-    try {
-      await pendingOrder.interaction.deleteReply();
-    } catch (cleanupErr) {
-      logger.debug(`QRIS cleanup for ${orderId}: ${cleanupErr.message}`);
-    }
+  if (pendingOrder?.interaction) {
+    try { await pendingOrder.interaction.deleteReply(); } catch (_) {}
     activeOrders.delete(orderId);
   }
 
-  logger.info(`Order ${orderId} completed successfully for ${txData.username}`);
+  logger.info(`Order ${orderId} completed for ${txData.username}`);
 }
 
 // ─── 10. POLLING ENGINE ──────────────────────
@@ -426,28 +352,7 @@ async function pollPendingPayments() {
 
         if (checkData.transaction && checkData.transaction.status === 'completed') {
           logger.info(`Poll: Order ${tx.order_id} is PAID — processing...`);
-
-          // Atomic claim: only this poll wins
-          const { data: claimed, error: claimErr } = await supabase
-            .from('transaction_logs')
-            .update({ status: 'completed' })
-            .eq('order_id', tx.order_id)
-            .eq('status', 'pending')
-            .select()
-            .single();
-
-          if (claimErr) {
-            logger.error(`Poll claim error for ${tx.order_id}: ${claimErr.message}`);
-            continue;
-          }
-
-          if (!claimed) {
-            logger.info(`Poll: Order ${tx.order_id} already claimed by another process`);
-            continue;
-          }
-
-          // Process payment
-          await processPayment(claimed);
+          await processPayment(tx);
 
         } else {
           logger.debug(`Poll: Order ${tx.order_id} still pending (Pakasir: ${checkData.transaction?.status || 'unknown'})`);
