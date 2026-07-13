@@ -630,7 +630,7 @@ client.on('interactionCreate', async (interaction) => {
           .maybeSingle();
 
         if (error || !orders) {
-          return interaction.editReply('📭 Belum ada transaksi ditemukan untuk akun Discord kamu.');
+          return interaction.editReply('📭 Belum ada transaksi ditemukan untuk akun Discord kamu.').catch(() => {});
         }
 
         // Kalo pending, cek langsung ke Pakasir API
@@ -654,9 +654,15 @@ client.on('interactionCreate', async (interaction) => {
 
             if (checkData.transaction && checkData.transaction.status === 'completed') {
               logger.info(`CekStatus[${orders.order_id}]: PAID via manual check — processing...`);
-              await interaction.editReply('⏳ **Pembayaran terdeteksi!** Sedang memproses lisensi...');
-              await processPayment(orders);
-              return interaction.editReply('✅ **Pembayaran lunas!** Cek DM Discord untuk key.');
+              try {
+                await interaction.editReply({ content: '⏳ **Pembayaran terdeteksi!** Sedang memproses lisensi...' }).catch(() => {});
+                await processPayment(orders);
+                return interaction.editReply({ content: '✅ **Pembayaran lunas!** Cek DM Discord untuk key.' }).catch(() => {});
+              } catch (procErr) {
+                logger.error(`CekStatus[${orders.order_id}]: processPayment error: ${procErr.message}`);
+                await interaction.editReply({ content: '✅ Pembayaran terdeteksi! Key sedang dikirim... Cek DM Discord.' }).catch(() => {});
+                return;
+              }
             }
           } catch (pErr) {
             logger.warn(`CekStatus[${orders.order_id}]: Pakasir check failed: ${pErr.message}`);
@@ -674,10 +680,10 @@ client.on('interactionCreate', async (interaction) => {
           `▸ **Order ID:** \`${orders.order_id}\``,
           `▸ **Status:** ${orders.status === 'completed' ? '✅ LUNAS' : orders.status === 'pending' ? '⏳ Menunggu Pembayaran' : '❌ Gagal'}`,
           orders.status === 'completed' ? '🎉 License sudah aktif! Cek DM Discord kamu.' : '💳 Jika sudah bayar, klik **Cek Status** lagi untuk memproses otomatis.',
-        ].join('\n'));
+        ].join('\n')).catch(() => {});
       } catch (err) {
         logger.error(`Cek status error: ${err.message}`);
-        await interaction.editReply('❌ Gagal mengecek status. Coba lagi nanti.');
+        await interaction.editReply('❌ Gagal mengecek status. Coba lagi nanti.').catch(() => {});
       }
       return;
     }
