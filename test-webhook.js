@@ -1,58 +1,76 @@
 /**
- * TEST WEBHOOK — Simulasi callback pembayaran dari Pakasir
+ * TEST WEBHOOK — Simulasi pembayaran untuk v2.0 (Polling-based)
+ *
+ * v2.0 pake polling, bukan webhook. Jadi test ini langsung UPDATE
+ * status transaksi di Supabase jadi 'completed' — bot akan detect
+ * via polling dalam 0-15 detik.
  *
  * Cara pakai:
  *   1. Jalankan bot dulu: npm start
- *   2. Buka terminal lain, jalankan: npm run test-webhook
- *      atau: node test-webhook.js INV-xxxxx
+ *   2. Buka terminal lain, jalankan: npm run test-webhook INV-xxxxx
  *
- *   Argumen opsional: ORDER_ID (kalau tidak diberikan, pakai default)
+ *   Argumen: ORDER_ID (wajib)
  */
 
 require('dotenv').config();
-const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
 
-// Ambil order ID dari argumen CLI atau pakai default
-const orderId = process.argv[2] || process.env.TEST_ORDER_ID;
-
+const orderId = process.argv[2];
 if (!orderId) {
   console.error('❌ Gunakan: node test-webhook.js INV-xxxxx');
-  console.error('   atau set TEST_ORDER_ID di .env');
   process.exit(1);
 }
 
-const WEBHOOK_URL = process.env.TEST_WEBHOOK_URL || 'http://localhost:3000/webhook/pakasir';
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
 
-async function testPembayaran() {
-  console.log(`\n🔔 Mengirim simulasi pembayaran sukses...`);
-  console.log(`   Order ID : ${orderId}`);
-  console.log(`   URL      : ${WEBHOOK_URL}\n`);
+async function testPayment() {
+  console.log(`\n🔔 Simulasi pembayaran untuk order: ${orderId}\n`);
 
-  try {
-    const response = await axios.post(WEBHOOK_URL, {
-      order_id: orderId,
-      status: 'completed',
-      amount: 5000,
-    }, {
-      timeout: 10000,
-      headers: { 'Content-Type': 'application/json' },
-    });
+  // 1. Cek transaksi
+  const { data: tx, error: txErr } = await supabase
+    .from('transaction_logs')
+    .select('*')
+    .eq('order_id', orderId)
+    .single();
 
-    console.log('✅ RESPON DARI BOT:');
-    console.log(JSON.stringify(response.data, null, 2));
-
-    if (response.data.status === 'success') {
-      console.log('\n🎉 License berhasil diaktivasi! Cek DM Discord Anda.');
-    } else if (response.data.status === 'ignored') {
-      console.log('\n⚠️ Order sudah diproses sebelumnya (duplicate webhook).');
-    }
-  } catch (error) {
-    if (error.response) {
-      console.error('❌ ERROR:', error.response.status, JSON.stringify(error.response.data));
-    } else {
-      console.error('❌ ERROR:', error.message);
-    }
+  if (txErr || !tx) {
+    console.error(`❌ Transaksi ${orderId} tidak ditemukan di DB`);
+    console.error(txErr?.message || 'No data');
+    process.exit(1);
   }
+
+  console.log(`📋 Transaksi ditemukan:`);
+  console.log(`   User     : ${tx.username}`);
+  console.log(`   Amount   : Rp ${tx.amount}`);
+  console.log(`   Status   : ${tx.status}`);
+  console.log(`   Ref Code : ${tx.ref_code}`);
+  console.log(`   Method   : ${tx.payment_method}\n`);
+
+  if (tx.status === 'completed') {
+    console.log('⚠️ Transaksi sudah completed — skip');
+    process.exit(0);
+  }
+
+  // 2. Update status jadi completed (simulasi pembayaran)
+  const { error: updErr } = await supabase
+    .from('transaction_logs')
+    .update({ status: 'completed' })
+    .eq('order_id', orderId)
+    .eq('status', 'pending');
+
+  if (updErr) {
+    console.error('❌ Gagal update status:', updErr.message);
+    process.exit(1);
+  }
+
+  console.log('✅ Status transaksi di-update ke "completed"');
+  console.log('');
+  console.log('⏳ Bot akan mendeteksi dalam 0-15 detik via polling...');
+  console.log('   Cek DM Discord untuk key!');
+  console.log('   Cek log bot untuk detail.');
 }
 
-testPembayaran();
+testPayment();

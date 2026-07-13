@@ -542,13 +542,30 @@ client.on('interactionCreate', async (interaction) => {
             '',
             `🕐 Kedaluwarsa <t:${expiryUnix}:R>`,
             `📅 Aktif hingga <t:${Math.floor((Date.now() + packageInfo.days * 86400000) / 1000)}:f>`,
-          ].join('\n'))
+            '',
+            '> 🔄 **Status:** Menunggu pembayaran...',
+            '> ✅ Key akan dikirim **otomatis** ke DM ini setelah pembayaran terkonfirmasi.',
+            '> ❌ Jangan buka order baru — cukup tunggu, sistem memproses otomatis.',
+            ].join('\n'))
           .setImage('attachment://qris.png')
           .setFooter({ text: `Order: ${orderId}`, iconURL: client.user?.displayAvatarURL() })
           .setTimestamp();
 
-        await interaction.editReply({ embeds: [embedQris], files: [attachment] });
-        logger.info(`Order ${orderId}: ${robloxUsername} → ${packageInfo.label} (Rp${packageInfo.price})`);
+        // Kirim QR ke DM user (permanent — gak ilang meski Discord ditutup/discroll)
+        try {
+          const qrUser = await client.users.fetch(discordUserId);
+          await qrUser.send({ embeds: [embedQris], files: [attachment] });
+          await interaction.editReply({
+            content: '✅ **QRIS Payment dikirim ke DM!**\nSilakan cek **Direct Message (DM)** Discord kamu untuk melakukan pembayaran.\n\n> ⏳ Key akan dikirim otomatis ke DM setelah pembayaran terkonfirmasi. **Jangan buka order baru.**',
+          });
+          logger.info(`Order ${orderId}: QR sent to DM — ${robloxUsername} → ${packageInfo.label} (Rp${packageInfo.price})`);
+        } catch (dmErr) {
+          logger.warn(`Cannot DM user ${discordUserId}: ${dmErr.message}`);
+          await interaction.editReply({
+            content: '❌ Gagal mengirim DM. Pastikan pengaturan **Privasi Discord** kamu mengizinkan pesan dari anggota server ini.\n\n> 📌 **Settings → Privacy & Safety → Allow direct messages from server members**\n\nSetelah itu, coba lagi.',
+          }).catch(() => {});
+          return;
+        }
 
         // Track for cleanup
         activeOrders.set(orderId, {
