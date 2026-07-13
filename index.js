@@ -633,6 +633,37 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.editReply('📭 Belum ada transaksi ditemukan untuk akun Discord kamu.');
         }
 
+        // Kalo pending, cek langsung ke Pakasir API
+        if (orders.status === 'pending') {
+          try {
+            const checkRes = await axios.get(
+              'https://app.pakasir.com/api/transactiondetail',
+              {
+                params: {
+                  project:  process.env.PAKASIR_SLUG,
+                  amount:   orders.amount,
+                  order_id: orders.order_id,
+                  api_key:  process.env.PAKASIR_API_KEY,
+                },
+                timeout: 10000,
+              }
+            );
+
+            const checkData = checkRes.data;
+            logger.info(`CekStatus[${orders.order_id}]: Pakasir response — ${JSON.stringify(checkData).slice(0, 300)}`);
+
+            if (checkData.transaction && checkData.transaction.status === 'completed') {
+              logger.info(`CekStatus[${orders.order_id}]: PAID via manual check — processing...`);
+              await interaction.editReply('⏳ **Pembayaran terdeteksi!** Sedang memproses lisensi...');
+              await processPayment(orders);
+              return interaction.editReply('✅ **Pembayaran lunas!** Cek DM Discord untuk key.');
+            }
+          } catch (pErr) {
+            logger.warn(`CekStatus[${orders.order_id}]: Pakasir check failed: ${pErr.message}`);
+            // Fallback: tunjukkin status dari Supabase
+          }
+        }
+
         const pkg = VIP_PRICES[orders.payment_method];
         const statusEmoji = orders.status === 'completed' ? '✅' : orders.status === 'pending' ? '⏳' : '❌';
 
@@ -642,7 +673,7 @@ client.on('interactionCreate', async (interaction) => {
           `▸ **Username:** ${orders.username}`,
           `▸ **Order ID:** \`${orders.order_id}\``,
           `▸ **Status:** ${orders.status === 'completed' ? '✅ LUNAS' : orders.status === 'pending' ? '⏳ Menunggu Pembayaran' : '❌ Gagal'}`,
-          orders.status === 'completed' ? '🎉 License sudah aktif! Cek DM Discord kamu.' : '💳 Silakan selesaikan pembayaran jika belum.',
+          orders.status === 'completed' ? '🎉 License sudah aktif! Cek DM Discord kamu.' : '💳 Jika sudah bayar, klik **Cek Status** lagi untuk memproses otomatis.',
         ].join('\n'));
       } catch (err) {
         logger.error(`Cek status error: ${err.message}`);
