@@ -402,18 +402,18 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('👑 **Motion Core**')
         .setURL('https://dsc.gg/motioncore')
         .setDescription([
-          '### 💳 Order System',
-          'Ikuti langkah di bawah untuk membeli lisensi:',
+          '━━━━━━━━━━━━━━━━━━━━',
+          '**📌 Cara Pembelian:**',
           '',
-          '**1️⃣** Klik tombol **💳 Beli Sekarang**',
-          '**2️⃣** Pilih paket & masukkan **Username Roblox**',
-          '**3️⃣** Cek **DM Discord** — QRIS dikirim ke DM',
-          '**4️⃣** Scan QRIS & bayar via **E-Wallet / M-Banking**',
-          '**5️⃣** Key dikirim **otomatis** ke DM setelah lunas',
-          '',
-          '> ⏳ Proses pembayaran: scan QR → bayar → tunggu 0-15 detik → key otomatis ke DM',
-          '> ❌ **Jangan buka order baru** — cukup tunggu, sistem otomatis.',
-        ].join('\\n'))
+          '**1.** Klik tombol **💳 Beli Sekarang**',
+          '**2.** Pilih paket + **Username Roblox**',
+          '**3.** Cek **DM Discord** — QRIS dikirim ke DM',
+          '**4.** Scan QRIS & bayar via E-Wallet',
+          '**5.** Key dikirim otomatis ke DM ✅',
+          '━━━━━━━━━━━━━━━━━━━━',
+          '⏳ *Proses: scan QR → bayar → 0-15 dtk → key*',
+          '❌ *Jangan buka order baru — tunggu otomatis*',
+        ].join('\n'))
         .addFields(
           { name: '💎 **VIP Script**', value: 'Akses penuh • Update prioritas • Support 24/7', inline: true },
           { name: '⏳ **QRIS**',       value: 'Scan E-Wallet • Key otomatis • 15 menit',        inline: true },
