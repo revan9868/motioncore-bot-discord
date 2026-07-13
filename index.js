@@ -430,13 +430,15 @@ client.on('interactionCreate', async (interaction) => {
             '**⌛ QRIS**',
             'Scan E-Wallet • Key otomatis • 15 menit',
           ].join('\n'))
-        );
+        )
+        .addActionRowComponents(actionRow)
+        .addActionRowComponents(extraRow);
 
       await interaction.reply({
         content: '✅ Menu order VIP berhasil dipasang di channel ini.',
         flags: MessageFlags.Ephemeral,
       });
-      await interaction.channel.send({ components: [container, actionRow, extraRow] });
+      await interaction.channel.send({ components: [container] });
       logger.info(`Menu order VIP deployed by ${interaction.user.tag} in #${interaction.channel.name}`);
       return;
     }
