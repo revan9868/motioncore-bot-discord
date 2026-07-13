@@ -330,10 +330,11 @@ async function pollPendingPayments() {
       return;
     }
 
-    logger.debug(`Poll: checking ${pendingTx.length} pending transaction(s)`);
+    logger.info(`Poll: checking ${pendingTx.length} pending transaction(s)`);
 
     for (const tx of pendingTx) {
       try {
+        logger.info(`Poll[${tx.order_id}]: Checking Pakasir...`);
         // Cek status ke Pakasir API
         const checkRes = await axios.get(
           'https://app.pakasir.com/api/transactiondetail',
@@ -349,16 +350,18 @@ async function pollPendingPayments() {
         );
 
         const checkData = checkRes.data;
+        logger.info(`Poll[${tx.order_id}]: Pakasir response — ${JSON.stringify(checkData).slice(0, 300)}`);
 
         if (checkData.transaction && checkData.transaction.status === 'completed') {
-          logger.info(`Poll: Order ${tx.order_id} is PAID — processing...`);
+          logger.info(`Poll[${tx.order_id}]: PAID — processing...`);
           await processPayment(tx);
 
         } else {
-          logger.debug(`Poll: Order ${tx.order_id} still pending (Pakasir: ${checkData.transaction?.status || 'unknown'})`);
+          logger.info(`Poll[${tx.order_id}]: Still pending (Pakasir: ${checkData.transaction?.status || 'unknown'})`);
         }
       } catch (txErr) {
-        logger.debug(`Poll check failed for ${tx.order_id}: ${txErr.message}`);
+        logger.warn(`Poll[${tx.order_id}]: Pakasir check FAILED — ${txErr.message}`);
+        if (txErr.response) logger.warn(`  Response: ${txErr.response.status} ${JSON.stringify(txErr.response.data).slice(0, 200)}`);
       }
     }
   } catch (err) {
