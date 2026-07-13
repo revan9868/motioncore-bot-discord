@@ -12,8 +12,9 @@ const {
 
   // ── Layout Components ──
   ActionRowBuilder,
-  ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
-  FileBuilder, LabelBuilder,
+
+  // ── Content Components (V2) ──
+  LabelBuilder,
 
   // ── Interactive: Buttons & Selects ──
   ButtonBuilder, ButtonStyle,
@@ -24,6 +25,7 @@ const {
   RadioGroupBuilder,
 
   // ── Rich Content ──
+  EmbedBuilder,
   AttachmentBuilder,
 } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
@@ -272,26 +274,17 @@ async function processPayment(txData) {
     if (dUser) {
       const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
       await dUser.send({
-        components: [
-          new ContainerBuilder()
-            .setAccentColor(0x6bff8f)
-            .addTextDisplayComponents(
-              new TextDisplayBuilder().setContent([
-                '## ✅ **License Active**',
-                '',
-                '```',
-                finalKey,
-                '```',
-                '',
-                `**📌 Status:** ${statusText}`,
-                `**⏳ Expired:** <t:${unixTs}:R>`,
-                '',
-                '**📜 Script:**',
-                '```lua',
-                'loadstring(game:HttpGet("https://vip.motioncore.web.id"))()',
-                '```',
-              ].join('\n'))
-            )
+        embeds: [new EmbedBuilder()
+          .setColor('#6bff8f')
+          .setTitle('✅ **License Active**')
+          .setDescription(['```', finalKey, '```'].join('\n'))
+          .addFields(
+            { name: '📌 Status',   value: statusText,                inline: true },
+            { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,         inline: true },
+            { name: '📜 Script',   value: '```lua\nloadstring(game:HttpGet("https://vip.motioncore.web.id"))()\n```', inline: false },
+          )
+          .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
+          .setTimestamp()
         ],
       }).catch(() => {});
       logger.info(`DM sent to ${dUser.tag} with key ${finalKey}`);
@@ -404,39 +397,35 @@ client.on('interactionCreate', async (interaction) => {
           .setURL('https://discord.com/channels/1523647512337055917/1523684804728717383'),
       );
 
-      const container = new ContainerBuilder()
-        .setAccentColor(0x7803eb)
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent([
-            '━━━━━━━━━━━━━━━━━━━━',
-            '**📌 Cara Pembelian:**',
-            '',
-            '**1.** Klik tombol **💳 Beli Sekarang**',
-            '**2.** Pilih paket + **Username Roblox**',
-            '**3.** Cek **DM Discord** — QRIS dikirim ke DM',
-            '**4.** Scan QRIS & bayar via E-Wallet',
-            '**5.** Key dikirim otomatis ke DM ✅',
-            '━━━━━━━━━━━━━━━━━━━━',
-            '⏳ *Proses: scan QR → bayar → 0-15 dtk → key*',
-            '❌ *Jangan buka order baru — tunggu otomatis*',
-          ].join('\n'))
+      const embed = new EmbedBuilder()
+        .setColor('#7803eb')
+        .setTitle('👑 **Motion Core**')
+        .setURL('https://dsc.gg/motioncore')
+        .setDescription([
+          '━━━━━━━━━━━━━━━━━━━━',
+          '**📌 Cara Pembelian:**',
+          '',
+          '**1.** Klik tombol **💳 Beli Sekarang**',
+          '**2.** Pilih paket + **Username Roblox**',
+          '**3.** Cek **DM Discord** — QRIS dikirim ke DM',
+          '**4.** Scan QRIS & bayar via E-Wallet',
+          '**5.** Key dikirim otomatis ke DM ✅',
+          '━━━━━━━━━━━━━━━━━━━━',
+          '⏳ *Proses: scan QR → bayar → 0-15 dtk → key*',
+          '❌ *Jangan buka order baru — tunggu otomatis*',
+        ].join('\n'))
+        .addFields(
+          { name: '💎 **VIP Script**', value: 'Akses penuh • Update prioritas • Support 24/7', inline: true },
+          { name: '⏳ **QRIS**',       value: 'Scan E-Wallet • Key otomatis • 15 menit',        inline: true },
         )
-        .addSeparatorComponents(new SeparatorBuilder())
-        .addTextDisplayComponents(
-          new TextDisplayBuilder().setContent([
-            '**💎 VIP Script**',
-            'Akses penuh • Update prioritas • Support 24/7',
-            '',
-            '**⌛ QRIS**',
-            'Scan E-Wallet • Key otomatis • 15 menit',
-          ].join('\n'))
-        );
+        .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
+        .setTimestamp();
 
       await interaction.reply({
         content: '✅ Menu order VIP berhasil dipasang di channel ini.',
         flags: MessageFlags.Ephemeral,
       });
-      await interaction.channel.send({ components: [container, actionRow, extraRow] });
+      await interaction.channel.send({ embeds: [embed], components: [actionRow, extraRow] });
       logger.info(`Menu order VIP deployed by ${interaction.user.tag} in #${interaction.channel.name}`);
       return;
     }
@@ -548,30 +537,31 @@ client.on('interactionCreate', async (interaction) => {
         const attachment = new AttachmentBuilder(qrBuffer, { name: 'qris.png' });
 
         const expiryUnix = Math.floor((Date.now() + QRIS_TIMEOUT_MS) / 1000);
-        const qrisContent = new ContainerBuilder()
-          .setAccentColor(0x7803eb)
-          .addTextDisplayComponents(
-            new TextDisplayBuilder().setContent([
-              `### ${packageInfo.label}`,
-              `**Harga:** Rp ${packageInfo.price.toLocaleString('id-ID')}`,
-              `**Target:** \`${robloxUsername}\``,
-              '',
-              'Silakan scan QRIS di bawah ini dengan **E-Wallet** atau **M-Banking**.',
-              '',
-              `🕐 Kedaluwarsa <t:${expiryUnix}:R>`,
-              `📅 Aktif hingga <t:${Math.floor((Date.now() + packageInfo.days * 86400000) / 1000)}:f>`,
-              '',
-              '> 🔄 **Status:** Menunggu pembayaran...',
-              '> ✅ Key akan dikirim **otomatis** ke DM ini setelah pembayaran terkonfirmasi.',
-              '> ❌ Jangan buka order baru — cukup tunggu, sistem memproses otomatis.',
+        const embedQris = new EmbedBuilder()
+          .setColor('#7803eb')
+          .setTitle('💳 **Pembayaran**')
+          .setDescription([
+            `### ${packageInfo.label}`,
+            `**Harga:** Rp ${packageInfo.price.toLocaleString('id-ID')}`,
+            `**Target:** \`${robloxUsername}\``,
+            '',
+            'Silakan scan QRIS di bawah ini dengan **E-Wallet** atau **M-Banking**.',
+            '',
+            `🕐 Kedaluwarsa <t:${expiryUnix}:R>`,
+            `📅 Aktif hingga <t:${Math.floor((Date.now() + packageInfo.days * 86400000) / 1000)}:f>`,
+            '',
+            '> 🔄 **Status:** Menunggu pembayaran...',
+            '> ✅ Key akan dikirim **otomatis** ke DM ini setelah pembayaran terkonfirmasi.',
+            '> ❌ Jangan buka order baru — cukup tunggu, sistem memproses otomatis.',
             ].join('\n'))
-          )
-          .addFileComponents(new FileBuilder().setURL('attachment://qris.png'));
+          .setImage('attachment://qris.png')
+          .setFooter({ text: `Order: ${orderId}`, iconURL: client.user?.displayAvatarURL() })
+          .setTimestamp();
 
         // Kirim QR ke DM user (permanent — gak ilang meski Discord ditutup/discroll)
         try {
           const qrUser = await client.users.fetch(discordUserId);
-          await qrUser.send({ components: [qrisContent], files: [attachment] });
+          await qrUser.send({ embeds: [embedQris], files: [attachment] });
           await interaction.editReply({
             content: '✅ **QRIS Payment dikirim ke DM!**\nSilakan cek **Direct Message (DM)** Discord kamu untuk melakukan pembayaran.\n\n> ⏳ Key akan dikirim otomatis ke DM setelah pembayaran terkonfirmasi. **Jangan buka order baru.**',
           });
