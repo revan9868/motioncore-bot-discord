@@ -152,7 +152,7 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel, discordUs
           `**Key:** \`${keyString}\``,
           `**Ref:** ${txData.ref_code || '-'}`,
           `**Order ID:** \`${txData.order_id}\``,
-        ].join('\\n'),
+        ].join('\n'),
         color,
         footer: { text: 'Motion Core Auto System via Polling' },
         timestamp: new Date().toISOString(),
