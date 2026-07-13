@@ -129,7 +129,7 @@ async function sendTestiWebhook(txData, discordUser) {
 }
 
 // ─── 8. ADMIN LOG WEBHOOK ────────────────────
-async function sendAdminLog(txData, keyString, isExtension, planLabel) {
+async function sendAdminLog(txData, keyString, isExtension, planLabel, discordUser) {
   const webhookUrl = process.env.ADMIN_WEBHOOK_URL;
   if (!webhookUrl) return;
 
@@ -137,6 +137,7 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
     const fmtPrice = new Intl.NumberFormat('id-ID').format(txData.amount);
     const title = isExtension ? '🔄 LICENSE EXTENDED' : '💸 NEW AUTOMATIC PAYMENT';
     const color = isExtension ? 3066993 : 5763719;
+    const discordName = discordUser ? discordUser.tag : 'Unknown#0000';
 
     await axios.post(webhookUrl, {
       username: 'Motion Core Web Bot',
@@ -144,13 +145,14 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel) {
       embeds: [{
         title,
         description: [
-          `**User:** \`${txData.username}\``,
+          `**Roblox:** \`${txData.username}\``,
+          `**Discord:** \`${discordName}\``,
           `**Plan:** ${planLabel || txData.payment_method}`,
           `**Amount:** Rp ${fmtPrice}`,
           `**Key:** \`${keyString}\``,
           `**Ref:** ${txData.ref_code || '-'}`,
           `**Order ID:** \`${txData.order_id}\``,
-        ].join('\n'),
+        ].join('\\n'),
         color,
         footer: { text: 'Motion Core Auto System via Polling' },
         timestamp: new Date().toISOString(),
@@ -298,7 +300,7 @@ async function processPayment(txData) {
 
   // ── 9g. Webhooks ──
   await sendTestiWebhook(txData, dUser);
-  await sendAdminLog(txData, finalKey, isExtension, planInfo?.label);
+  await sendAdminLog(txData, finalKey, isExtension, planInfo?.label, dUser);
 
   // ── 9h. Cleanup QRIS ──
   const pendingOrder = activeOrders.get(orderId);
