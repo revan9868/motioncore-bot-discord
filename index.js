@@ -403,10 +403,17 @@ client.on('interactionCreate', async (interaction) => {
         .setURL('https://dsc.gg/motioncore')
         .setDescription([
           '### 💳 Order System',
-          'Pilih tombol **Beli Sekarang** untuk memulai pembelian lisensi.',
+          'Ikuti langkah di bawah untuk membeli lisensi:',
           '',
-          '> Key dikirim otomatis via **DM Discord** setelah pembayaran dikonfirmasi.',
-        ].join('\n'))
+          '**1️⃣** Klik tombol **💳 Beli Sekarang**',
+          '**2️⃣** Pilih paket & masukkan **Username Roblox**',
+          '**3️⃣** Cek **DM Discord** — QRIS dikirim ke DM',
+          '**4️⃣** Scan QRIS & bayar via **E-Wallet / M-Banking**',
+          '**5️⃣** Key dikirim **otomatis** ke DM setelah lunas',
+          '',
+          '> ⏳ Proses pembayaran: scan QR → bayar → tunggu 0-15 detik → key otomatis ke DM',
+          '> ❌ **Jangan buka order baru** — cukup tunggu, sistem otomatis.',
+        ].join('\\n'))
         .addFields(
           { name: '💎 **VIP Script**', value: 'Akses penuh • Update prioritas • Support 24/7', inline: true },
           { name: '⏳ **QRIS**',       value: 'Scan E-Wallet • Key otomatis • 15 menit',        inline: true },
