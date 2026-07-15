@@ -188,7 +188,7 @@ async function processPayment(txData) {
   const { data: dupKeys } = await supabase
     .from('license_keys')
     .select('*')
-    .contains('transaction_proof', orderId)
+    .ilike('transaction_proof', `%${orderId}%`)
     .limit(1);
 
   if (dupKeys?.[0]) {
@@ -362,7 +362,7 @@ async function pollPendingPayments() {
           logger.info(`Poll[${tx.order_id}]: Still pending (Pakasir: ${checkData.transaction?.status || 'unknown'})`);
         }
       } catch (txErr) {
-        logger.warn(`Poll[${tx.order_id}]: Pakasir check FAILED — ${txErr.message}`);
+        logger.warn(`Poll[${tx.order_id}]: Check FAILED — ${txErr.message}`);
         if (txErr.response) logger.warn(`  Response: ${txErr.response.status} ${JSON.stringify(txErr.response.data).slice(0, 200)}`);
       }
     }
