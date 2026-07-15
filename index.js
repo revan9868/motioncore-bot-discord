@@ -54,7 +54,9 @@ const VIP_PRICES = {
 
 const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const QRIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 menit
-const POLL_INTERVAL_MS = 15 * 1000;      // 15 detik
+const POLL_INTERVAL_MS = 45 * 1000;      // 45 detik (more lenient to avoid 429 rate limit)
+const TX_CHECK_COOLDOWN_MS = 60 * 1000;  // Minimal 60 detik antar pengecekan tiap transaksi
+const MAX_TX_PER_CYCLE = 10;             // Maks 10 transaksi dicek per siklus (biar gak overload)
 const COMMAND_NAME = 'setup-vip';
 
 // ─── 4. SUPABASE ─────────────────────────────
@@ -75,6 +77,9 @@ const client = new Client({
 // Map<order_id, { discordUserId, channelId, plan, interaction }>
 // Used for QRIS cleanup & expiry notification (in-memory, lost on restart — acceptable)
 const activeOrders = new Map();
+
+// Tracking last-check time per transaction to avoid hammering Pakasir API (429 rate limit)
+const lastChecked = new Map();
 
 // ─── 6. LICENSE KEY GENERATOR ────────────────
 function generateLicenseKey() {
@@ -308,6 +313,7 @@ async function processPayment(txData) {
     try { await pendingOrder.interaction.deleteReply(); } catch (_) {}
     activeOrders.delete(orderId);
   }
+  lastChecked.delete(orderId); // Cleanup cooldown tracker
 
   logger.info(`Order ${orderId} completed for ${txData.username}`);
 }
@@ -334,7 +340,33 @@ async function pollPendingPayments() {
 
     logger.info(`Poll: checking ${pendingTx.length} pending transaction(s)`);
 
-    for (const tx of pendingTx) {
+    // Sortir: transaksi paling lama dulu (created_at ascending)
+    pendingTx.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+
+    // Batasi jumlah transaksi per cycle — skip sisanya ke cycle berikutnya
+    const batch = pendingTx.slice(0, MAX_TX_PER_CYCLE);
+    const oldestPending = pendingTx[0];
+
+    // Bersihkan lastChecked entries untuk transaksi yang udah expired (>15 menit)
+    const now = Date.now();
+    for (const [oid, ts] of lastChecked) {
+      if (now - ts > 30 * 60 * 1000 && !pendingTx.some(tx => tx.order_id === oid)) {
+        lastChecked.delete(oid); // Transaksi gak ada di list lagi → cleanup
+      }
+    }
+
+    for (const tx of batch) {
+      // ── Skip transaksi yang baru di-check (< 60 detik) ──
+      const lastCheck = lastChecked.get(tx.order_id) || 0;
+      if (Date.now() - lastCheck < TX_CHECK_COOLDOWN_MS) {
+        logger.debug(`Poll[${tx.order_id}]: Skipping (checked ${Math.round((Date.now() - lastCheck) / 1000)}s ago)`);
+        continue;
+      }
+      lastChecked.set(tx.order_id, Date.now());
+
+      // Small stagger delay to avoid burst requests to Pakasir API
+      await new Promise(r => setTimeout(r, 500));
+
       try {
         logger.info(`Poll[${tx.order_id}]: Checking Pakasir...`);
         // Cek status ke Pakasir API
@@ -359,11 +391,29 @@ async function pollPendingPayments() {
           await processPayment(tx);
 
         } else {
-          logger.info(`Poll[${tx.order_id}]: Still pending (Pakasir: ${checkData.transaction?.status || 'unknown'})`);
+          const pStatus = checkData.transaction?.status || 'unknown';
+          // If Pakasir says canceled — mark as expired so we never poll again
+          if (pStatus === 'canceled' || pStatus === 'failed') {
+            await supabase
+              .from('transaction_logs')
+              .update({ status: 'expired' })
+              .eq('order_id', tx.order_id)
+              .eq('status', 'pending');
+            logger.info(`Poll[${tx.order_id}]: Marked as expired (Pakasir: ${pStatus})`);
+          } else {
+            logger.info(`Poll[${tx.order_id}]: Still pending (Pakasir: ${pStatus})`);
+          }
         }
       } catch (txErr) {
-        logger.warn(`Poll[${tx.order_id}]: Check FAILED — ${txErr.message}`);
-        if (txErr.response) logger.warn(`  Response: ${txErr.response.status} ${JSON.stringify(txErr.response.data).slice(0, 200)}`);
+        const is429 = txErr.response?.status === 429;
+        if (is429) {
+          // Rate limited — extend cooldown so we don't hammer Pakasir
+          lastChecked.set(tx.order_id, Date.now() - TX_CHECK_COOLDOWN_MS + 30000);
+          logger.warn(`Poll[${tx.order_id}]: Rate limited (429) — cooling down 30s`);
+        } else {
+          logger.warn(`Poll[${tx.order_id}]: Check FAILED — ${txErr.message}`);
+          if (txErr.response) logger.warn(`  Response: ${txErr.response.status} ${JSON.stringify(txErr.response.data).slice(0, 200)}`);
+        }
       }
     }
   } catch (err) {
@@ -587,25 +637,33 @@ client.on('interactionCreate', async (interaction) => {
           interaction,
         });
 
-        // QRIS expiry notification (15 menit)
-        setTimeout(() => {
+        // QRIS expiry notification (15 menit) + mark expired di DB
+        setTimeout(async () => {
           activeOrders.delete(orderId);
 
-          supabase
-            .from('transaction_logs')
-            .select('status')
-            .eq('order_id', orderId)
-            .single()
-            .then(({ data }) => {
-              if (data && data.status === 'pending') {
-                client.users.fetch(discordUserId).then(user => {
-                  user.send({
-                    content: `⏳ **QRIS untuk ${packageInfo.label} sudah expired.**\nSilakan order ulang melalui channel <#${interaction.channelId}>.`,
-                  }).catch(() => {});
-                  logger.info(`Expired notification sent to ${discordUserId} for ${orderId}`);
+          try {
+            const { data } = await supabase
+              .from('transaction_logs')
+              .select('status')
+              .eq('order_id', orderId)
+              .single();
+
+            if (data && data.status === 'pending') {
+              // Mark as expired so polling stops picking it up
+              await supabase
+                .from('transaction_logs')
+                .update({ status: 'expired' })
+                .eq('order_id', orderId)
+                .eq('status', 'pending');
+
+              client.users.fetch(discordUserId).then(user => {
+                user.send({
+                  content: `⏳ **QRIS untuk ${packageInfo.label} sudah expired.**\nSilakan order ulang melalui channel <#${interaction.channelId}>.`,
                 }).catch(() => {});
-              }
-            }).catch(() => {});
+                logger.info(`Expired notification sent to ${discordUserId} for ${orderId}`);
+              }).catch(() => {});
+            }
+          } catch (_) {}
 
         }, QRIS_TIMEOUT_MS);
 
@@ -807,10 +865,14 @@ client.once('ready', async () => {
     }
   }
 
-  // Start polling engine
+  // Start polling engine (recursive setTimeout — no overlap!)
   logger.info(`⏰ Starting payment poller (every ${POLL_INTERVAL_MS / 1000}s)`);
-  pollPendingPayments(); // Run immediately
-  setInterval(pollPendingPayments, POLL_INTERVAL_MS);
+  const scheduleNextPoll = () => {
+    setTimeout(() => {
+      pollPendingPayments().finally(scheduleNextPoll);
+    }, POLL_INTERVAL_MS);
+  };
+  pollPendingPayments().finally(scheduleNextPoll); // Run immediately, then schedule next
 
   // Start weekly cleanup (10s delay)
   setTimeout(() => {
