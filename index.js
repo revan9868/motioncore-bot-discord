@@ -277,7 +277,9 @@ async function processPayment(txData) {
   // ── 9f. Send DM & assign role ──
   let dUser = null;
   if (discordUserId) {
-    try { dUser = await client.users.fetch(discordUserId); } catch (_) {}
+    try { dUser = await client.users.fetch(discordUserId); } catch (_) {
+      logger.warn(`processPayment[${orderId}]: Cannot fetch Discord user ${discordUserId} — key exists in DB but DM not sent. User can use Cek Status button.`);
+    }
     if (dUser) {
       const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
       await dUser.send({
@@ -345,9 +347,8 @@ async function pollPendingPayments() {
 
     // Batasi jumlah transaksi per cycle — skip sisanya ke cycle berikutnya
     const batch = pendingTx.slice(0, MAX_TX_PER_CYCLE);
-    const oldestPending = pendingTx[0];
 
-    // Bersihkan lastChecked entries untuk transaksi yang udah expired (>15 menit)
+    // Bersihkan lastChecked entries
     const now = Date.now();
     for (const [oid, ts] of lastChecked) {
       if (now - ts > 30 * 60 * 1000 && !pendingTx.some(tx => tx.order_id === oid)) {
@@ -731,15 +732,16 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         const pkg = VIP_PRICES[orders.payment_method];
-        const statusEmoji = orders.status === 'completed' ? '✅' : orders.status === 'pending' ? '⏳' : '❌';
+        const statusEmoji = orders.status === 'completed' ? '✅' : orders.status === 'pending' ? '⏳' : '⌛';
+        const statusLabel = orders.status === 'completed' ? '✅ LUNAS' : orders.status === 'pending' ? '⏳ Menunggu Pembayaran' : '⌛ Kedaluwarsa';
 
         await interaction.editReply([
           `${statusEmoji} **Status Pesanan Terakhir**`,
           `▸ **Paket:** ${pkg ? pkg.label : orders.payment_method}`,
           `▸ **Username:** ${orders.username}`,
           `▸ **Order ID:** \`${orders.order_id}\``,
-          `▸ **Status:** ${orders.status === 'completed' ? '✅ LUNAS' : orders.status === 'pending' ? '⏳ Menunggu Pembayaran' : '❌ Gagal'}`,
-          orders.status === 'completed' ? '🎉 License sudah aktif! Cek DM Discord kamu.' : '💳 Jika sudah bayar, klik **Cek Status** lagi untuk memproses otomatis.',
+          `▸ **Status:** ${statusLabel}`,
+          orders.status === 'completed' ? '🎉 License sudah aktif! Cek DM Discord kamu.' : orders.status === 'pending' ? '💳 Jika sudah bayar, klik **Cek Status** lagi untuk memproses otomatis.' : '⏳ QRIS sudah kedaluwarsa. Silakan order ulang.',
         ].join('\n')).catch(() => {});
       } catch (err) {
         logger.error(`Cek status error: ${err.message}`);
@@ -867,6 +869,19 @@ client.once('ready', async () => {
 
   // Start polling engine (recursive setTimeout — no overlap!)
   logger.info(`⏰ Starting payment poller (every ${POLL_INTERVAL_MS / 1000}s)`);
+
+  // Cleanup stale pending transactions (>15 menit) — in case bot restarted mid-QRIS
+  try {
+    const staleCutoff = new Date(Date.now() - QRIS_TIMEOUT_MS).toISOString();
+    const { error: staleErr } = await supabase
+      .from('transaction_logs')
+      .update({ status: 'expired' })
+      .eq('status', 'pending')
+      .like('ref_code', 'DSCRD-%')
+      .lt('created_at', staleCutoff);
+    if (!staleErr) logger.info(`✅ Stale pending transactions cleaned up (before ${staleCutoff})`);
+  } catch (_) {}
+
   const scheduleNextPoll = () => {
     setTimeout(() => {
       pollPendingPayments().finally(scheduleNextPoll);
@@ -874,10 +889,16 @@ client.once('ready', async () => {
   };
   pollPendingPayments().finally(scheduleNextPoll); // Run immediately, then schedule next
 
-  // Start weekly cleanup (10s delay)
+  // Start weekly cleanup (10s delay, recursive setTimeout)
   setTimeout(() => {
     cleanupExpiredKeys();
-    setInterval(cleanupExpiredKeys, WEEKLY_MS);
+    // Use recursive setTimeout instead of setInterval for consistency
+    const scheduleWeeklyCleanup = () => {
+      setTimeout(() => {
+        cleanupExpiredKeys().finally(scheduleWeeklyCleanup);
+      }, WEEKLY_MS);
+    };
+    scheduleWeeklyCleanup();
     logger.info(`⏰ Weekly cleanup scheduled (every ${WEEKLY_MS / 86400000} days)`);
   }, 10000);
 });
