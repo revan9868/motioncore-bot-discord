@@ -52,7 +52,7 @@ const VIP_PRICES = {
   '30_DAYS': { price: 60000, days: 30, label: '30 Hari'  },
 };
 
-const ADD_DEVICE_PRICE = 10000; // Tambah device slot
+const ADD_DEVICE_PRICE = 5000; // Tambah device slot
 const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const QRIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 menit
 const POLL_INTERVAL_MS = 45 * 1000;      // 45 detik (more lenient to avoid 429 rate limit)
@@ -631,12 +631,12 @@ client.on('interactionCreate', async (interaction) => {
           '❌ *Jangan buka order baru — tunggu otomatis*',
           '',
           '**➕ Punya lebih dari 1 device?**',
-          'Klik **➕ Tambah Device** untuk menambah slot device lisensi kamu hanya **Rp10.000** per slot.',
+          'Klik **➕ Tambah Device** untuk menambah slot device lisensi kamu hanya **Rp5.000** per slot.',
         ].join('\n'))
         .addFields(
           { name: '💎 **VIP Script**', value: 'Akses penuh • Update prioritas • Support 24/7', inline: true },
           { name: '⏳ **QRIS**',       value: 'Scan E-Wallet • Key otomatis • 15 menit',        inline: true },
-          { name: '💻 **Multi Device**', value: `➕ Rp10.000/slot — via **Tambah Device**`,     inline: true },
+          { name: '💻 **Multi Device**', value: `➕ Rp5.000/slot — via **Tambah Device**`,     inline: true },
         )
         .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
         .setTimestamp();
