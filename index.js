@@ -1136,10 +1136,6 @@ async function cleanupExpiredKeys() {
             if (member) {
               await member.roles.remove(process.env.VIP_ROLE_ID);
               logger.info(`Role removed from ${key.discord_id} (expired key)`);
-
-              await member.send({
-                content: '⏳ **Lisensi VIP kamu sudah expired.**\nSilakan perpanjang melalui channel <#1524384173517963304> agar tetap bisa menggunakan script.',
-              }).catch(() => {});
             }
           } catch (memberErr) {
             logger.debug(`Cannot process member ${key.discord_id}: ${memberErr.message}`);
