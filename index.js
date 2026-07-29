@@ -52,6 +52,7 @@ const VIP_PRICES = {
   '30_DAYS': { price: 60000, days: 30, label: '30 Hari'  },
 };
 
+const ADD_DEVICE_PRICE = 10000; // Tambah device slot
 const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const QRIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 menit
 const POLL_INTERVAL_MS = 45 * 1000;      // 45 detik (more lenient to avoid 429 rate limit)
@@ -170,6 +171,42 @@ async function sendAdminLog(txData, keyString, isExtension, planLabel, discordUs
   }
 }
 
+// ─── 8b. ADMIN LOG: ADD_DEVICE ───────────────
+async function sendAddDeviceLog(txData, keyString, oldLimit, newLimit, discordUser) {
+  const webhookUrl = process.env.ADMIN_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  try {
+    const fmtPrice = new Intl.NumberFormat('id-ID').format(txData.amount);
+    const discordName = discordUser ? discordUser.tag : 'Unknown#0000';
+
+    await axios.post(webhookUrl, {
+      username: 'Motion Core Web Bot',
+      avatar_url: 'https://i.postimg.cc/1zFrmJkR/photo-2026-07-06-18-11-06.jpg',
+      embeds: [{
+        title: '➕ DEVICE SLOT ADDED',
+        description: [
+          `**Roblox:** \`${txData.username}\``,
+          `**Discord:** \`${discordName}\``,
+          `**Service:** Tambah Device Slot`,
+          `**Amount:** Rp ${fmtPrice}`,
+          `**Key:** \`${keyString}\``,
+          `**Device Limit:** ${oldLimit} → **${newLimit}**`,
+          `**Ref:** ${txData.ref_code || '-'}`,
+          `**Order ID:** \`${txData.order_id}\``,
+        ].join('\n'),
+        color: 44444,
+        footer: { text: 'Motion Core Auto System via Polling' },
+        timestamp: new Date().toISOString(),
+      }],
+    });
+
+    logger.info(`AddDevice admin log sent for order ${txData.order_id}`);
+  } catch (err) {
+    logger.warn(`Failed to send add_device admin log: ${err.message}`);
+  }
+}
+
 // ─── 9. PROCESS PAYMENT (Worker-style: simple, reliable) ──
 async function processPayment(txData) {
   const orderId = txData.order_id;
@@ -178,6 +215,100 @@ async function processPayment(txData) {
   let discordUserId = null;
   if (txData.ref_code && txData.ref_code.startsWith('DSCRD-')) {
     discordUserId = txData.ref_code.replace('DSCRD-', '');
+  }
+
+  // ── 9a1. ADD_DEVICE: tambah slot device ──
+  if (txData.payment_method === 'ADD_DEVICE') {
+    // Anti double claim
+    // ── Anti double-claim (text search in transaction_proof) ──
+    const { data: dupKeys, error: dupError } = await supabase
+      .from('license_keys')
+      .select('*')
+      .ilike('transaction_proof', `%${orderId}%`)
+      .limit(1);
+
+    if (dupError) {
+      logger.error(`AddDevice[${orderId}]: Duplicate check error: ${dupError.message}`);
+    }
+
+    if (dupKeys?.[0]) {
+      logger.info(`AddDevice[${orderId}] already processed — duplicate poll`);
+      return;
+    }
+
+    // Mark completed
+    await supabase
+      .from('transaction_logs')
+      .update({ status: 'completed' })
+      .eq('order_id', orderId)
+      .eq('status', 'pending');
+
+    // Cari license aktif user, increment max_devices
+    const { data: license } = await supabase
+      .from('license_keys')
+      .select('*')
+      .eq('assigned_username', txData.username)
+      .eq('is_active', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (!license) {
+      logger.warn(`AddDevice[${orderId}]: No active license found for ${txData.username}`);
+      return;
+    }
+
+    const currentLimit = Number(license.max_devices) || 1;
+    const newLimit = currentLimit + 1;
+
+    await supabase
+      .from('license_keys')
+      .update({
+        max_devices: newLimit,
+        transaction_amount: (Number(license.transaction_amount) || 0) + Number(txData.amount),
+        transaction_proof: `${license.transaction_proof || ''} | ${orderId}`,
+        note: `${license.note || ''} [AddDevice: +1 slot]`,
+      })
+      .eq('key_string', license.key_string);
+
+    logger.info(`AddDevice[${orderId}]: ${txData.username} → max_devices ${currentLimit} → ${newLimit} (key: ${license.key_string})`);
+
+    // Send DM
+    let dUser = null;
+    if (discordUserId) {
+      try { dUser = await client.users.fetch(discordUserId); } catch (_) {}
+      if (dUser) {
+        await dUser.send({
+          embeds: [new EmbedBuilder()
+            .setColor('#00d2ff')
+            .setTitle('➕ **Device Slot Added**')
+            .setDescription([
+              `**License Key:** \`${license.key_string}\``,
+              `**Username:** \`${txData.username}\``,
+              `**Device Limit:** ${currentLimit} → **${newLimit}**`,
+              '',
+              '✅ Slot device berhasil ditambahkan!',
+              'Kamu sekarang bisa menggunakan script di **' + newLimit + ' device** secara bersamaan.',
+            ].join('\n'))
+            .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
+            .setTimestamp()
+          ],
+        }).catch(() => {});
+        logger.info(`AddDevice DM sent to ${dUser.tag}`);
+      }
+    }
+
+    // Admin log
+    await sendAddDeviceLog(txData, license.key_string, currentLimit, newLimit, dUser);
+
+    // Cleanup QRIS
+    const pendingOrder = activeOrders.get(orderId);
+    if (pendingOrder?.interaction) {
+      try { await pendingOrder.interaction.deleteReply(); } catch (_) {}
+      activeOrders.delete(orderId);
+    }
+
+    logger.info(`AddDevice[${orderId}] completed for ${txData.username}`);
+    return;
   }
 
   // ── 9b. Parse duration ──
@@ -189,12 +320,16 @@ async function processPayment(txData) {
 
   const planInfo = VIP_PRICES[txData.payment_method];
 
-  // ── 9c. Anti double claim (Worker-style) ──
-  const { data: dupKeys } = await supabase
+  // ── 9c. Anti double-claim (text search in transaction_proof) ──
+  const { data: dupKeys, error: dupError } = await supabase
     .from('license_keys')
     .select('*')
     .ilike('transaction_proof', `%${orderId}%`)
     .limit(1);
+
+  if (dupError) {
+    logger.error(`Order ${orderId}: Duplicate check error: ${dupError.message}`);
+  }
 
   if (dupKeys?.[0]) {
     logger.info(`Order ${orderId} already has key — duplicate poll`);
@@ -270,6 +405,7 @@ async function processPayment(txData) {
       transaction_amount: txData.amount,
       transaction_proof:  orderId,
       allowed_modules:    ['all'],
+      max_devices:         1,
       note:               'Auto Payment via Polling (Fresh Key)',
     }]);
   }
@@ -284,13 +420,18 @@ async function processPayment(txData) {
       const unixTs = Math.floor(new Date(expiresAt).getTime() / 1000);
       await dUser.send({
         embeds: [new EmbedBuilder()
-          .setColor('#6bff8f')
-          .setTitle('✅ **License Active**')
-          .setDescription(['```', finalKey, '```'].join('\n'))
+          .setColor('#58f287')
+          .setTitle('✅ License Active')
+          .setDescription(finalKey)
           .addFields(
-            { name: '📌 Status',   value: statusText,                inline: true },
-            { name: '⏳ Expired',  value: `<t:${unixTs}:R>`,         inline: true },
-            { name: '📜 Script',   value: '```lua\nloadstring(game:HttpGet("https://vip.motioncore.web.id"))()\n```', inline: false },
+            { name: '👤 Username', value: txData.username, inline: true },
+            { name: '📌 Status',   value: statusText,      inline: true },
+            { name: '⏳ Expired',  value: `<t:${unixTs}:R>`, inline: true },
+            { 
+              name: '📜 Script', 
+              value: 'Klik di sini → <#1523693640889663558>', 
+              inline: false 
+            }
           )
           .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
           .setTimestamp()
@@ -412,8 +553,19 @@ async function pollPendingPayments() {
           lastChecked.set(tx.order_id, Date.now() - TX_CHECK_COOLDOWN_MS + 30000);
           logger.warn(`Poll[${tx.order_id}]: Rate limited (429) — cooling down 30s`);
         } else {
-          logger.warn(`Poll[${tx.order_id}]: Check FAILED — ${txErr.message}`);
-          if (txErr.response) logger.warn(`  Response: ${txErr.response.status} ${JSON.stringify(txErr.response.data).slice(0, 200)}`);
+          // Distinguish Pakasir API errors from processPayment errors
+          const isProcessError = txErr.message && (
+            txErr.message.includes('duplicate') ||
+            txErr.message.includes('Supabase') ||
+            txErr.message.includes('license_keys') ||
+            txErr.message.includes('transaction_logs')
+          );
+          if (isProcessError) {
+            logger.error(`Poll[${tx.order_id}]: processPayment FAILED — ${txErr.message}`);
+          } else {
+            logger.warn(`Poll[${tx.order_id}]: Pakasir API check FAILED — ${txErr.message}`);
+            if (txErr.response) logger.warn(`  Response: ${txErr.response.status} ${JSON.stringify(txErr.response.data).slice(0, 200)}`);
+          }
         }
       }
     }
@@ -453,6 +605,14 @@ client.on('interactionCreate', async (interaction) => {
           .setURL('https://discord.com/channels/1523647512337055917/1523684804728717383'),
       );
 
+      const deviceRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('add_device')
+          .setLabel('➕ Tambah Device')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('➕'),
+      );
+
       const embed = new EmbedBuilder()
         .setColor('#7803eb')
         .setTitle('👑 **Motion Core**')
@@ -469,10 +629,14 @@ client.on('interactionCreate', async (interaction) => {
           '━━━━━━━━━━━━━━━━━━━━',
           '⏳ *Proses: scan QR → bayar → 0-15 dtk → key*',
           '❌ *Jangan buka order baru — tunggu otomatis*',
+          '',
+          '**➕ Punya lebih dari 1 device?**',
+          'Klik **➕ Tambah Device** untuk menambah slot device lisensi kamu hanya **Rp10.000** per slot.',
         ].join('\n'))
         .addFields(
           { name: '💎 **VIP Script**', value: 'Akses penuh • Update prioritas • Support 24/7', inline: true },
           { name: '⏳ **QRIS**',       value: 'Scan E-Wallet • Key otomatis • 15 menit',        inline: true },
+          { name: '💻 **Multi Device**', value: `➕ Rp10.000/slot — via **Tambah Device**`,     inline: true },
         )
         .setFooter({ text: 'Motion Core Auto System', iconURL: client.user?.displayAvatarURL() })
         .setTimestamp();
@@ -481,7 +645,7 @@ client.on('interactionCreate', async (interaction) => {
         content: '✅ Menu order VIP berhasil dipasang di channel ini.',
         flags: MessageFlags.Ephemeral,
       });
-      await interaction.channel.send({ embeds: [embed], components: [actionRow, extraRow] });
+      await interaction.channel.send({ embeds: [embed], components: [actionRow, extraRow, deviceRow] });
       logger.info(`Menu order VIP deployed by ${interaction.user.tag} in #${interaction.channel.name}`);
       return;
     }
@@ -522,6 +686,30 @@ client.on('interactionCreate', async (interaction) => {
         .setTextInputComponent(usernameInput);
 
       modal.addComponents(packageLabel, usernameLabel);
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // ── 11b1. Tombol Tambah Device → Modal ──
+    if (interaction.isButton() && interaction.customId === 'add_device') {
+      const modal = new ModalBuilder()
+        .setCustomId('modal_add_device')
+        .setTitle('Motion Core • Tambah Device');
+
+      const usernameInput = new TextInputBuilder()
+        .setCustomId('roblox_username_add_device')
+        .setPlaceholder('Masukkan username Roblox kamu')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(3)
+        .setMaxLength(30);
+
+      const usernameLabel = new LabelBuilder()
+        .setLabel('Username Roblox')
+        .setDescription('Device slot akan ditambahkan ke lisensi username ini')
+        .setTextInputComponent(usernameInput);
+
+      modal.addComponents(usernameLabel);
       await interaction.showModal(modal);
       return;
     }
@@ -677,6 +865,142 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // ── 11c2. Modal Tambah Device Submit → QRIS ──
+    if (interaction.isModalSubmit() && interaction.customId === 'modal_add_device') {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      const robloxUsername = interaction.fields
+        .getTextInputValue('roblox_username_add_device')
+        .trim();
+      const cleanUsername = robloxUsername.startsWith('@') ? robloxUsername.substring(1) : robloxUsername;
+
+      const discordUserId = interaction.user.id;
+      const orderId = `INV-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+      try {
+        // Cek apakah user punya license aktif
+        const { data: existingKey } = await supabase
+          .from('license_keys')
+          .select('*')
+          .eq('assigned_username', cleanUsername)
+          .eq('is_active', true)
+          .limit(1)
+          .maybeSingle();
+
+        if (!existingKey) {
+          return interaction.editReply('❌ Tidak ditemukan lisensi aktif untuk username **' + cleanUsername + '**.\nSilakan beli VIP terlebih dahulu melalui tombol **💳 Beli Sekarang**.').catch(() => {});
+        }
+
+        // Generate QRIS via Pakasir
+        const pakasirRes = await axios.post(
+          'https://app.pakasir.com/api/transactioncreate/qris',
+          {
+            project:  process.env.PAKASIR_SLUG,
+            order_id: orderId,
+            amount:   ADD_DEVICE_PRICE,
+            api_key:  process.env.PAKASIR_API_KEY,
+          },
+          { timeout: 15000 }
+        );
+
+        const qrString = pakasirRes.data.payment.payment_number;
+        if (!qrString) throw new Error('Pakasir response missing payment_number');
+
+        // Simpan ke database
+        const { error: dbError } = await supabase
+          .from('transaction_logs')
+          .insert([{
+            order_id:       orderId,
+            username:       cleanUsername,
+            amount:         ADD_DEVICE_PRICE,
+            payment_method: 'ADD_DEVICE',
+            status:         'pending',
+            ref_code:       `DSCRD-${discordUserId}`,
+          }]);
+
+        if (dbError) {
+          logger.error(`DB insert failed (add_device): ${dbError.message}`);
+          return interaction.editReply('❌ Gagal menyimpan pesanan. Hubungi Admin.');
+        }
+
+        // Generate & attach QR code
+        const qrBuffer = await QRCode.toBuffer(qrString, { width: 300, margin: 2 });
+        const attachment = new AttachmentBuilder(qrBuffer, { name: 'qris.png' });
+
+        const expiryUnix = Math.floor((Date.now() + QRIS_TIMEOUT_MS) / 1000);
+        const embedQris = new EmbedBuilder()
+          .setColor('#7803eb')
+          .setTitle('➕ **Tambah Device**')
+          .setDescription([
+            '### +1 Device Slot',
+            `**Harga:** Rp ${ADD_DEVICE_PRICE.toLocaleString('id-ID')}`,
+            `**Target:** \`${cleanUsername}\``,
+            `**License Key:** \`${existingKey.key_string}\``,
+            '',
+            'Silakan scan QRIS di bawah ini dengan **E-Wallet** atau **M-Banking**.',
+            '',
+            `🕐 Kedaluwarsa <t:${expiryUnix}:R>`,
+            '',
+            '> 🔄 **Status:** Menunggu pembayaran...',
+            '> ✅ Slot device akan ditambahkan **otomatis** setelah pembayaran terkonfirmasi.',
+            ].join('\n'))
+          .setImage('attachment://qris.png')
+          .setFooter({ text: `Order: ${orderId}`, iconURL: client.user?.displayAvatarURL() })
+          .setTimestamp();
+
+        // Kirim QR ke DM
+        try {
+          const qrUser = await client.users.fetch(discordUserId);
+          await qrUser.send({ embeds: [embedQris], files: [attachment] });
+          await interaction.editReply({
+            content: '✅ **QRIS Tambah Device dikirim ke DM!**\nSilakan cek **Direct Message (DM)** Discord kamu untuk melakukan pembayaran.\n\n> ⏳ Slot device akan ditambahkan otomatis setelah pembayaran terkonfirmasi.',
+          });
+          logger.info(`AddDevice[${orderId}]: QR sent to DM — ${cleanUsername} → +1 device for key ${existingKey.key_string}`);
+        } catch (dmErr) {
+          logger.warn(`Cannot DM user ${discordUserId}: ${dmErr.message}`);
+          await interaction.editReply({
+            content: '❌ Gagal mengirim DM. Pastikan pengaturan **Privasi Discord** kamu mengizinkan pesan dari anggota server ini.\n\n> 📌 **Settings → Privacy & Safety → Allow direct messages from server members**\n\nSetelah itu, coba lagi.',
+          }).catch(() => {});
+          return;
+        }
+
+        // Track for cleanup
+        activeOrders.set(orderId, {
+          discordUserId,
+          channelId: interaction.channelId,
+          plan: 'ADD_DEVICE',
+          interaction,
+        });
+
+        // QRIS expiry notification (15 menit)
+        setTimeout(() => {
+          activeOrders.delete(orderId);
+          supabase
+            .from('transaction_logs')
+            .select('status')
+            .eq('order_id', orderId)
+            .single()
+            .then(({ data }) => {
+              if (data && data.status === 'pending') {
+                client.users.fetch(discordUserId).then(user => {
+                  user.send({
+                    content: `⏳ **QRIS Tambah Device (Rp${ADD_DEVICE_PRICE.toLocaleString('id-ID')}) sudah expired.**\nSilakan order ulang melalui channel <#${interaction.channelId}>.`,
+                  }).catch(() => {});
+                  logger.info(`AddDevice expired notification sent to ${discordUserId} for ${orderId}`);
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+        }, QRIS_TIMEOUT_MS);
+
+      } catch (err) {
+        logger.error(`AddDevice order failed for ${interaction.user.tag}: ${err.message}`);
+        await interaction.editReply(
+          '❌ Terjadi kesalahan saat memproses penambahan device. Silakan coba lagi atau hubungi Admin.'
+        ).catch(() => {});
+      }
+      return;
+    }
+
     // ── 11d. Tombol: Cek Status ───────────
     if (interaction.isButton() && interaction.customId === 'cek_status') {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -721,7 +1045,7 @@ client.on('interactionCreate', async (interaction) => {
                 return interaction.editReply({ content: '✅ **Pembayaran lunas!** Cek DM Discord untuk key.' }).catch(() => {});
               } catch (procErr) {
                 logger.error(`CekStatus[${orders.order_id}]: processPayment error: ${procErr.message}`);
-                await interaction.editReply({ content: '✅ Pembayaran terdeteksi! Key sedang dikirim... Cek DM Discord.' }).catch(() => {});
+                await interaction.editReply({ content: '❌ **Pembayaran terdeteksi** tapi gagal memproses lisensi. Silakan coba lagi atau hubungi Admin.\n> Error: ' + procErr.message }).catch(() => {});
                 return;
               }
             }
@@ -760,8 +1084,8 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ─── 12. WEEKLY CRON: Hapus role expired ──────
-const WEEKLY_MS = 7 * 24 * 60 * 60 * 1000; // 7 hari
+// ─── 12. DAILY CRON: Hapus role expired ──────
+const WEEKLY_MS = 24 * 60 * 60 * 1000; // 1 hari
 
 async function cleanupExpiredKeys() {
   logger.info('🔍 Running weekly expired key cleanup...');
@@ -794,19 +1118,34 @@ async function cleanupExpiredKeys() {
       logger.info(`Key ${key.key_string} deactivated (expired)`);
 
       if (key.discord_id) {
-        try {
-          const guild = await client.guilds.fetch(process.env.GUILD_ID);
-          const member = await guild.members.fetch(key.discord_id);
-          if (member) {
-            await member.roles.remove(process.env.VIP_ROLE_ID);
-            logger.info(`Role removed from ${key.discord_id} (expired key)`);
+        // Cek apakah masih ada key aktif lain milik user ini
+        const { data: otherActive } = await supabase
+          .from('license_keys')
+          .select('id')
+          .eq('discord_id', key.discord_id)
+          .eq('is_active', true)
+          .neq('key_string', key.key_string)
+          .limit(1);
 
-            await member.send({
-              content: '⏳ **Lisensi VIP kamu sudah expired.**\nSilakan perpanjang melalui channel <#1523684804728717383> agar tetap bisa menggunakan script.',
-            }).catch(() => {});
+        const hasOtherActive = otherActive && otherActive.length > 0;
+
+        if (!hasOtherActive) {
+          try {
+            const guild = await client.guilds.fetch(process.env.GUILD_ID);
+            const member = await guild.members.fetch(key.discord_id);
+            if (member) {
+              await member.roles.remove(process.env.VIP_ROLE_ID);
+              logger.info(`Role removed from ${key.discord_id} (expired key)`);
+
+              await member.send({
+                content: '⏳ **Lisensi VIP kamu sudah expired.**\nSilakan perpanjang melalui channel <#1524384173517963304> agar tetap bisa menggunakan script.',
+              }).catch(() => {});
+            }
+          } catch (memberErr) {
+            logger.debug(`Cannot process member ${key.discord_id}: ${memberErr.message}`);
           }
-        } catch (memberErr) {
-          logger.debug(`Cannot process member ${key.discord_id}: ${memberErr.message}`);
+        } else {
+          logger.info(`Skipped role removal for ${key.discord_id} — still has ${otherActive.length} active key(s)`);
         }
       }
     }
